@@ -873,6 +873,10 @@ def case_review(application_id):
     intelligence=unified_case_intelligence(application_id)
     return intelligence
 
+@app.route("/health/detailed",methods=["GET"])
+def detailed_health():
+    return jsonify({"status":"ok","database":db.session.execute(db.text("SELECT 1")).scalar()==1,"model_loaded":model is not None,"environment":os.getenv("FLASK_ENV","development")})
+
 if __name__ == "__main__":
     print("Starting Flask server...")
     print(f"Model loaded: {model_loaded}")
