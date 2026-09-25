@@ -153,13 +153,6 @@ def provider_for_user(user):
     return Provider.query.filter_by(user_id=user.id).first()
 
 
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
-    response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS"
-    return response
-
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 model_loaded = False
@@ -907,6 +900,16 @@ def claim_intelligence(claim_id):
     if text and c.claimed_amount and str(c.claimed_amount) not in text:signals.append("Claimed amount was not found verbatim in supplied document.")
     if c.claimed_amount and c.claimed_amount>100000:signals.append("High-value claim requires human review.")
     return jsonify({"claim":claim_to_dict(c),"extracted":extracted,"signals":signals,"human_review_required":bool(signals)})
+
+@app.route("/claims/<int:claim_id>/image-intelligence",methods=["POST"])
+@roles_required("claims_officer","underwriter","admin")
+def claim_image_intelligence(claim_id):
+    c=db.session.get(Claim,claim_id)
+    if not c:return jsonify({"error":"Claim not found"}),404
+    d=request.get_json() or {}
+    path=str(d.get("image_path","")).strip()
+    if not path:return jsonify({"error":"image_path is required"}),400
+    return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(path)})
 
 @app.route("/cases/<int:application_id>/review",methods=["GET"])
 @roles_required("underwriter","claims_officer","admin")
