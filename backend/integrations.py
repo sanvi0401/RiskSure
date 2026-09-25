@@ -1,7 +1,7 @@
 """Optional production integrations for RiskSure.
 
-All clients are lazy and configuration-driven. Missing credentials never prevent
-the Flask application from starting; endpoints report a clear integration error.
+These integrations are configuration-driven and never prevent the Flask app
+from starting when an optional service or package is unavailable.
 """
 import os
 from typing import Any
@@ -18,12 +18,12 @@ def neo4j_driver():
         return None
     try:
         from neo4j import GraphDatabase
-    except ImportError:
+        return GraphDatabase.driver(
+            os.environ["NEO4J_URI"],
+            auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+        )
+    except Exception:
         return None
-    return GraphDatabase.driver(
-        os.environ["NEO4J_URI"],
-        auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
-    )
 
 
 def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
@@ -57,40 +57,53 @@ def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
         return {"nodes": [], "edges": []}
     query = """
     MATCH (c:Claim {id: $claim_id})
-    OPTIONAL MATCH (customer:Customer)-[r1:SUBMITTED]->(c)
-    OPTIONAL MATCH (provider:Provider)-[r2:HANDLES]->(c)
-    OPTIONAL MATCH (customer)-[r3:SUBMITTED]->(related:Claim)
+    OPTIONAL MATCH (customer:Customer)-[:SUBMITTED]->(c)
+    OPTIONAL MATCH (provider:Provider)-[:HANDLES]->(c)
+    OPTIONAL MATCH (customer)-[:SUBMITTED]->(related:Claim)
     RETURN c, customer, provider, related
     """
-    nodes, edges, seen_nodes, seen_edges = [], [], set(), set()
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    seen_nodes: set[str] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
     try:
         with driver.session() as session:
             for row in session.run(query, claim_id=claim_id):
-            for node, kind in ((row["c"], "claim"), (row["customer"], "customer"),
-                               (row["provider"], "provider"), (row["related"], "claim")):
-                if node is None:
-                    continue
-                node_id = f"{kind}-{node.get('id')}"
-                if node_id not in seen_nodes:
-                    seen_nodes.add(node_id)
-                    nodes.append({"id": node_id, "type": kind, "properties": dict(node)})
-            if row["customer"] is not None:
-                edge=("customer-"+str(row["customer"].get("id")), "claim-"+str(claim_id), "submitted")
-                if edge not in seen_edges:
-                    seen_edges.add(edge); edges.append({"source":edge[0],"target":edge[1],"relationship":edge[2]})
-            if row["provider"] is not None:
-                edge=("provider-"+str(row["provider"].get("id")), "claim-"+str(claim_id), "handles")
-                if edge not in seen_edges:
-                    seen_edges.add(edge); edges.append({"source":edge[0],"target":edge[1],"relationship":edge[2]})
-            if row["related"] is not None and row["customer"] is not None:
-                edge=("customer-"+str(row["customer"].get("id")), "claim-"+str(row["related"].get("id")), "submitted")
-                if edge not in seen_edges:
-                    seen_edges.add(edge); edges.append({"source":edge[0],"target":edge[1],"relationship":edge[2]})
+                for node, kind in (
+                    (row["c"], "claim"),
+                    (row["customer"], "customer"),
+                    (row["provider"], "provider"),
+                    (row["related"], "claim"),
+                ):
+                    if node is None:
+                        continue
+                    node_id = f"{kind}-{node.get('id')}"
+                    if node_id not in seen_nodes:
+                        seen_nodes.add(node_id)
+                        nodes.append({"id": node_id, "type": kind, "properties": dict(node)})
+                customer = row["customer"]
+                provider = row["provider"]
+                related = row["related"]
+                if customer is not None:
+                    edge = (f"customer-{customer.get('id')}", f"claim-{claim_id}", "submitted")
+                    if edge not in seen_edges:
+                        seen_edges.add(edge)
+                        edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
+                if provider is not None:
+                    edge = (f"provider-{provider.get('id')}", f"claim-{claim_id}", "handles")
+                    if edge not in seen_edges:
+                        seen_edges.add(edge)
+                        edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
+                if related is not None and customer is not None:
+                    edge = (f"customer-{customer.get('id')}", f"claim-{related.get('id')}", "submitted")
+                    if edge not in seen_edges:
+                        seen_edges.add(edge)
+                        edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
+        return {"nodes": nodes, "edges": edges}
     except Exception:
         return {"nodes": [], "edges": []}
     finally:
         driver.close()
-    return {"nodes": nodes, "edges": edges}
 
 
 def hf_request(prompt: str, *, max_tokens: int = 500) -> str | None:
@@ -98,12 +111,11 @@ def hf_request(prompt: str, *, max_tokens: int = 500) -> str | None:
     model = os.getenv("HUGGINGFACE_MODEL", "").strip()
     if not token or not model:
         return None
-    url = f"https://api-inference.huggingface.co/models/{model}"
     try:
         response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={"inputs": prompt, "parameters": {"max_new_tokens": max_tokens, "return_full_text": False}},
+            f"https://api-inference.huggingface.co/models/{model}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"inputs": prompt, "parameters": {"max_new_tokens": max_tokens, "return_full_text": False}},
             timeout=60,
         )
         response.raise_for_status()
@@ -111,7 +123,7 @@ def hf_request(prompt: str, *, max_tokens: int = 500) -> str | None:
         if isinstance(payload, list) and payload and isinstance(payload[0], dict):
             return payload[0].get("generated_text") or payload[0].get("text")
     except (requests.RequestException, ValueError):
-        return None
+        pass
     return None
 
 
@@ -120,19 +132,19 @@ def hf_embeddings(texts: list[str]) -> list[list[float]] | None:
     model = os.getenv("HUGGINGFACE_EMBEDDING_MODEL", "").strip()
     if not token or not model:
         return None
-    url = f"https://api-inference.huggingface.co/models/{model}"
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        json={"inputs": texts, "options": {"wait_for_model": True}},
-        timeout=60,
-    )
-    response.raise_for_status()
+    try:
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{model}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"inputs": texts, "options": {"wait_for_model": True}},
+            timeout=60,
+        )
+        response.raise_for_status()
         payload = response.json()
         if isinstance(payload, list) and payload and isinstance(payload[0], list):
             return payload
     except (requests.RequestException, ValueError):
-        return None
+        pass
     return None
 
 
@@ -142,28 +154,30 @@ def chroma_collection():
         return None
     try:
         import chromadb
-    except ImportError:
+        port = int(os.getenv("CHROMA_PORT", "8000"))
+        kwargs: dict[str, Any] = {"host": host, "port": port}
+        api_key = os.getenv("CHROMA_API_KEY", "").strip()
+        if api_key:
+            kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
+        return chromadb.HttpClient(**kwargs).get_or_create_collection(
+            name=os.getenv("CHROMA_COLLECTION", "risksure_policies")
+        )
+    except (ImportError, ValueError, TypeError):
         return None
-    port = int(os.getenv("CHROMA_PORT", "8000"))
-    kwargs = {"host": host, "port": port}
-    api_key = os.getenv("CHROMA_API_KEY", "").strip()
-    if api_key:
-        kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
-    try:
-        client = chromadb.HttpClient(**kwargs)
-        return client.get_or_create_collection(name=os.getenv("CHROMA_COLLECTION", "risksure_policies"))
     except Exception:
         return None
 
 
 def index_policy_chunks(policy_id: int, chunks: list[str]) -> int:
     collection = chroma_collection()
-    if collection is None:
+    if collection is None or not chunks:
         return 0
     embeddings = hf_embeddings(chunks)
-    ids = [f"policy-{policy_id}-{i}" for i in range(len(chunks))]
-    metadata = [{"policy_id": policy_id, "section": i + 1} for i in range(len(chunks))]
-    kwargs = {"ids": ids, "documents": chunks, "metadatas": metadata}
+    kwargs: dict[str, Any] = {
+        "ids": [f"policy-{policy_id}-{i}" for i in range(len(chunks))],
+        "documents": chunks,
+        "metadatas": [{"policy_id": policy_id, "section": i + 1} for i in range(len(chunks))],
+    }
     if embeddings:
         kwargs["embeddings"] = embeddings
     try:
@@ -175,11 +189,10 @@ def index_policy_chunks(policy_id: int, chunks: list[str]) -> int:
 
 def retrieve_policy_chunks(policy_id: int, question: str, n_results: int = 4) -> list[dict]:
     collection = chroma_collection()
-    if collection is None:
+    if collection is None or not question.strip():
         return []
     embeddings = hf_embeddings([question])
-    where = {"policy_id": policy_id}
-    kwargs = {"where": where, "n_results": n_results}
+    kwargs: dict[str, Any] = {"where": {"policy_id": policy_id}, "n_results": n_results}
     if embeddings:
         kwargs["query_embeddings"] = embeddings
     else:
@@ -194,18 +207,19 @@ def retrieve_policy_chunks(policy_id: int, question: str, n_results: int = 4) ->
 
 
 def analyze_claim_document(text: str) -> dict:
-    """OCR/document consistency layer. Uses Tesseract when installed."""
     import re
     extracted_text = text or ""
-    ocr_used = False
     if not extracted_text:
         return {"text": "", "ocr_used": False, "amounts": [], "claim_numbers": []}
-    amounts = [float(x.replace(",", "")) for x in re.findall(r"(?:₹|INR|Rs\.?)[ ]*([0-9][0-9,]*(?:\.\d+)?)", extracted_text, re.I)]
+    amounts = [
+        float(x.replace(",", ""))
+        for x in re.findall(r"(?:₹|INR|Rs\.?)[ ]*([0-9][0-9,]*(?:\.\d+)?)", extracted_text, re.I)
+    ]
     claim_numbers = re.findall(r"\b(?:CLM|CLAIM)[- ]?[A-Z0-9-]{3,}\b", extracted_text, re.I)
-    return {"text": extracted_text[:12000], "ocr_used": ocr_used, "amounts": amounts, "claim_numbers": claim_numbers}
+    return {"text": extracted_text[:12000], "ocr_used": False, "amounts": amounts, "claim_numbers": claim_numbers}
+
 
 def analyze_claim_image(image_path: str) -> dict:
-    """Optional CV/YOLO hook. No model is bundled; configure YOLO_MODEL_PATH when available."""
     model_path = os.getenv("YOLO_MODEL_PATH", "").strip()
     if not model_path:
         return {"cv_available": False, "detections": [], "reason": "YOLO_MODEL_PATH is not configured"}
@@ -213,9 +227,10 @@ def analyze_claim_image(image_path: str) -> dict:
         from ultralytics import YOLO
         model = YOLO(model_path)
         result = model(image_path, verbose=False)[0]
-        names = result.names
-        detections = [{"class": names[int(box.cls[0])], "confidence": round(float(box.conf[0]), 4)}
-                      for box in result.boxes]
+        detections = [
+            {"class": result.names[int(box.cls[0])], "confidence": round(float(box.conf[0]), 4)}
+            for box in result.boxes
+        ]
         return {"cv_available": True, "detections": detections}
     except Exception as exc:
         return {"cv_available": False, "detections": [], "reason": str(exc)}
