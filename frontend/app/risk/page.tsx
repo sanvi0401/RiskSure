@@ -30,6 +30,7 @@ export default function RiskPage() {
 
   const validate = () => {
     const newErrors: Record<string, string> = {}
+    if (!applicationData.name || applicationData.age <= 0 || !applicationData.sex) newErrors.api = "Complete the applicant profile before calculating risk."
     if (!bmi || parseFloat(bmi) <= 0) newErrors.bmi = "Valid BMI is required"
     if (children === "" || parseInt(children) < 0) newErrors.children = "Valid number is required"
     if (!smoker) newErrors.smoker = "Smoker status is required"
@@ -67,12 +68,11 @@ export default function RiskPage() {
         body: JSON.stringify(payload),
       })
 
-      {
-        const appliedRules = []
+      const appliedRules: { rule: string; adjustment: number }[] = []
         if (smoker === "yes") appliedRules.push({ rule: "Smoker = Yes", adjustment: 0.2 })
         if (parseFloat(bmi) > 30) appliedRules.push({ rule: "BMI > 30", adjustment: 0.05 })
         if (parseInt(children) > 2) appliedRules.push({ rule: "Children > 2", adjustment: 0.05 })
-        setRiskScore(data.risk_score)
+      setRiskScore(data.risk_score)
       setApplicationData({
         bmi: parseFloat(bmi),
         children: parseInt(children),
@@ -86,11 +86,10 @@ export default function RiskPage() {
         appliedRules: data.applied_rules ?? appliedRules,
         modelStatus: data.model_status,
         explanation: data.explanation ?? { method: "", features: [] },
-        })
-      }
+      })
     } catch (error) {
       console.error("Risk calculation failed:", error)
-      setErrors((current) => ({ ...current, api: "Risk calculation failed. Make sure the backend is running and you are signed in." }))
+      setErrors((current) => ({ ...current, api: error instanceof Error ? error.message : "Risk calculation failed." }))
     } finally {
       setIsCalculating(false)
     }
