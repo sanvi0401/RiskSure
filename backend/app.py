@@ -1,6 +1,10 @@
 from datetime import timedelta\nfrom functools import wraps
 
 from flask import Flask, jsonify, request\nfrom flask_cors import CORS
+from flask_migrate import Migrate
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from cryptography.fernet import Fernet, InvalidToken
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 import joblib
 import numpy as np
@@ -33,6 +37,8 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 JWT_SECRET = os.getenv("JWT_SECRET_KEY")\nif not JWT_SECRET and os.getenv("FLASK_ENV") == "production":\n    raise RuntimeError("JWT_SECRET_KEY must be configured in production")\napp.config["JWT_SECRET_KEY"] = JWT_SECRET or "dev-only-change-this-secret"
 jwt = JWTManager(app)
 db.init_app(app)
+migrate = Migrate(app, db)
+limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["300 per minute"])
 
 with app.app_context():
     if os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true":
@@ -42,6 +48,31 @@ with app.app_context():
 VALID_ROLES = {"customer", "underwriter", "claims_officer", "provider", "admin"}
 STAFF_ROLES = {"underwriter", "claims_officer", "provider", "admin"}
 TOTP_REQUIRED_ROLES = STAFF_ROLES
+
+def _fernet():
+    key = os.getenv("TOTP_ENCRYPTION_KEY", "").strip()
+    if not key:
+        return None
+    return Fernet(key.encode())
+
+def _encrypt_secret(secret):
+    f = _fernet()
+    if f is None:
+        if os.getenv("FLASK_ENV") == "production":
+            raise RuntimeError("TOTP_ENCRYPTION_KEY must be configured in production")
+        return secret
+    return f.encrypt(secret.encode()).decode()
+
+def _decrypt_secret(secret):
+    if not secret:
+        return None
+    f = _fernet()
+    if f is None:
+        return secret
+    try:
+        return f.decrypt(secret.encode()).decode()
+    except InvalidToken:
+        return secret
 
 
 
@@ -213,6 +244,7 @@ def register():
 
 
 @app.route("/auth/login", methods=["POST"])
+@limiter.limit("10 per minute")
 def login():
     data = request.get_json() or {}
     email = str(data.get("email", "")).strip().lower()
@@ -241,7 +273,7 @@ def totp_setup():
     if user is None:
         return jsonify({"error": "User not found"}), 404
     secret = pyotp.random_base32()
-    user.totp_pending_secret = secret
+    user.totp_pending_secret = _encrypt_secret(secret)
     db.session.commit()
     uri = pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="RiskSure")
     return jsonify({"secret": secret, "otpauth_uri": uri})
@@ -257,7 +289,7 @@ def verify_totp_setup():
     code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
     if user is None or not user.totp_pending_secret:
         return jsonify({"error": "No pending TOTP setup"}), 400
-    if not pyotp.TOTP(user.totp_pending_secret).verify(code, valid_window=1):
+    if not pyotp.TOTP(_decrypt_secret(user.totp_pending_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid authenticator code"}), 400
     codes = generate_recovery_codes()
     user.totp_secret = user.totp_pending_secret
@@ -271,6 +303,7 @@ def verify_totp_setup():
 
 
 @app.route("/auth/login/verify-totp", methods=["POST"])
+@limiter.limit("10 per minute")
 @jwt_required()
 def verify_login_totp():
     claims = get_jwt()
@@ -280,12 +313,13 @@ def verify_login_totp():
     code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
     if user is None or not user.totp_enabled or not user.totp_secret:
         return jsonify({"error": "TOTP verification unavailable"}), 400
-    if not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
+    if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid authenticator code"}), 401
     return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
 
 
 @app.route("/auth/login/recovery", methods=["POST"])
+@limiter.limit("5 per minute")
 @jwt_required()
 def login_recovery():
     claims = get_jwt()
@@ -311,7 +345,7 @@ def login_recovery():
 def disable_totp():
     user = current_user_record()
     code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
-    if user is None or not user.totp_enabled or not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
+    if user is None or not user.totp_enabled or not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Valid authenticator code required"}), 400
     user.totp_enabled = False
     user.totp_secret = None
