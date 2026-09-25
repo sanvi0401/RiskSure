@@ -7,7 +7,6 @@ from functools import wraps
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_migrate import Migrate
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
@@ -51,7 +50,6 @@ JWT_SECRET = os.getenv("JWT_SECRET_KEY") or os.getenv("TOTP_ENCRYPTION_KEY") or 
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
 jwt = JWTManager(app)
 db.init_app(app)
-migrate = Migrate(app, db)
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["300 per minute"])
 
 with app.app_context():
