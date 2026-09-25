@@ -178,11 +178,13 @@ try:
     print("-------------------------")
 
     from xgboost import XGBRegressor
-    import shap
-
     model = XGBRegressor()
     model.load_model(os.path.join(MODEL_DIR, "insurance_xgb_model.json"))
-    explainer = shap.TreeExplainer(model)
+    try:
+        import shap
+        explainer = shap.TreeExplainer(model)
+    except Exception:
+        explainer = None
     risk_bounds = joblib.load(os.path.join(MODEL_DIR, "risk_bounds.pkl"))
 
     min_charge = risk_bounds.get("min_charge", 0) if isinstance(risk_bounds, dict) else risk_bounds[0]
