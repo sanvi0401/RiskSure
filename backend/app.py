@@ -1,10 +1,11 @@
 from flask import Flask, jsonify, request
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
 import joblib
 import numpy as np
 import os
 
 from database import db
-from models import Application
+from models import Application, User
 
 app = Flask(__name__)
 
@@ -14,6 +15,8 @@ if DATABASE_URL.startswith("postgres://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-only-change-this-secret")
+jwt = JWTManager(app)
 db.init_app(app)
 
 with app.app_context():
@@ -71,6 +74,61 @@ def health():
         "model_loaded": model_loaded,
         "saved_applications": Application.query.count(),
     })
+
+
+@app.route("/auth/register", methods=["POST"])
+def register():
+    data = request.get_json() or {}
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+    requested_role = str(data.get("role", "customer")).strip().lower()
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    if requested_role != "customer":
+        return jsonify({"error": "Public registration can only create customer accounts"}), 403
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "An account with this email already exists"}), 409
+
+    user = User(email=email, role="customer")
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"message": "Account created", "user": user.to_dict()}), 201
+
+
+@app.route("/auth/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+    user = User.query.filter_by(email=email).first()
+
+    if user is None or not user.check_password(password):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    token = create_access_token(identity=str(user.id), additional_claims={"role": user.role})
+    return jsonify({"access_token": token, "user": user.to_dict()})
+
+
+@app.route("/auth/me", methods=["GET"])
+@jwt_required()
+def current_user():
+    user = db.session.get(User, int(get_jwt_identity()))
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"user": user.to_dict()})
+
+
+@app.route("/auth/staff-only", methods=["GET"])
+@jwt_required()
+def staff_only():
+    role = get_jwt().get("role")
+    if role not in {"underwriter", "claims_officer", "provider", "admin"}:
+        return jsonify({"error": "Staff access required"}), 403
+    return jsonify({"message": "Staff access granted", "role": role})
 
 
 @app.route("/process", methods=["POST"])
@@ -133,6 +191,7 @@ def process():
 
 
 @app.route("/save", methods=["POST"])
+@jwt_required()
 def save():
     data = request.get_json()
 
@@ -161,12 +220,14 @@ def save():
 
 
 @app.route("/applications", methods=["GET"])
+@jwt_required()
 def get_applications():
     applications = Application.query.order_by(Application.created_at.desc()).all()
     return jsonify([application.to_dict() for application in applications])
 
 
 @app.route("/applications/<int:application_id>", methods=["GET"])
+@jwt_required()
 def get_application(application_id):
     application = db.session.get(Application, application_id)
     if application is None:
