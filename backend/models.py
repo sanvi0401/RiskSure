@@ -108,6 +108,8 @@ class Application(db.Model):
     decision = db.Column(db.String(50), nullable=False, default="Unknown")
     premium = db.Column(db.Float, nullable=False, default=0.0)
     review_status = db.Column(db.String(40), nullable=False, default="pending")
+    decision_reason = db.Column(db.Text, nullable=True)
+    reviewed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     assigned_underwriter_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
