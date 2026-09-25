@@ -18,6 +18,7 @@ interface AuthContextType {
   isLoading: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => void
+  hasRole: (roles: UserRole | UserRole[]) => boolean
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -57,7 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.localStorage.setItem("risksure_user", JSON.stringify(data.user))
   }
 
-  const logout = () => {
+  const hasRole = (roles: UserRole | UserRole[]) => {\n    if (!user) return false\n    const allowed = Array.isArray(roles) ? roles : [roles]\n    return allowed.includes(user.role)\n  }\n\n  const logout = () => {
     setToken(null)
     setUser(null)
     window.localStorage.removeItem("risksure_access_token")
@@ -65,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, logout, hasRole }}>
       {children}
     </AuthContext.Provider>
   )
