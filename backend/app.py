@@ -1,6 +1,6 @@
 from datetime import timedelta\nfrom functools import wraps
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request\nfrom flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 import joblib
 import numpy as np
@@ -21,7 +21,7 @@ from models import (
     User,
 )
 
-app = Flask(__name__)
+app = Flask(__name__)\nCORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, supports_credentials=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///risksure.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -29,7 +29,7 @@ if DATABASE_URL.startswith("postgres://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-only-change-this-secret")
+JWT_SECRET = os.getenv("JWT_SECRET_KEY")\nif not JWT_SECRET and os.getenv("FLASK_ENV") == "production":\n    raise RuntimeError("JWT_SECRET_KEY must be configured in production")\napp.config["JWT_SECRET_KEY"] = JWT_SECRET or "dev-only-change-this-secret"
 jwt = JWTManager(app)
 db.init_app(app)
 
