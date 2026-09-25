@@ -59,7 +59,7 @@ with app.app_context():
 
 VALID_ROLES = {"customer", "underwriter", "claims_officer", "provider", "admin"}
 STAFF_ROLES = {"underwriter", "claims_officer", "provider", "admin"}
-TOTP_REQUIRED_ROLES = STAFF_ROLES
+TOTP_REQUIRED_ROLES = VALID_ROLES
 
 def _fernet():
     key = os.getenv("TOTP_ENCRYPTION_KEY", "").strip()
@@ -549,6 +549,8 @@ def get_applications():
         if profile is None:
             return jsonify([])
         query = query.filter_by(customer_id=profile.id)
+    elif user.role in {"claims_officer", "provider"}:
+        return jsonify([])
     elif user.role not in {"underwriter", "admin"}:
         return jsonify({"error": "Insufficient permissions"}), 403
 
@@ -751,7 +753,7 @@ def update_claim(claim_id):
 
 
 @app.route("/providers/me", methods=["GET"])
-@roles_required("provider")
+@roles_required("provider", "admin")
 def provider_me():
     provider = provider_for_user(current_user_record())
     if provider is None:
@@ -770,7 +772,7 @@ def provider_me():
 
 
 @app.route("/providers/me/claims", methods=["GET"])
-@roles_required("provider")
+@roles_required("provider", "admin")
 def provider_claims():
     provider = provider_for_user(current_user_record())
     if provider is None:
