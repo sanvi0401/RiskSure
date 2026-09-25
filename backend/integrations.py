@@ -16,7 +16,10 @@ def _configured(*names: str) -> bool:
 def neo4j_driver():
     if not _configured("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"):
         return None
-    from neo4j import GraphDatabase
+    try:
+        from neo4j import GraphDatabase
+    except ImportError:
+        return None
     return GraphDatabase.driver(
         os.environ["NEO4J_URI"],
         auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
@@ -38,10 +41,14 @@ def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
       MERGE (p)-[:HANDLES]->(cl)
     )
     """
-    with driver.session() as session:
-        session.run(query, **claim).consume()
-    driver.close()
-    return True
+    try:
+        with driver.session() as session:
+            session.run(query, **claim).consume()
+        return True
+    except Exception:
+        return False
+    finally:
+        driver.close()
 
 
 def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
@@ -56,8 +63,9 @@ def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
     RETURN c, customer, provider, related
     """
     nodes, edges, seen_nodes, seen_edges = [], [], set(), set()
-    with driver.session() as session:
-        for row in session.run(query, claim_id=claim_id):
+    try:
+        with driver.session() as session:
+            for row in session.run(query, claim_id=claim_id):
             for node, kind in ((row["c"], "claim"), (row["customer"], "customer"),
                                (row["provider"], "provider"), (row["related"], "claim")):
                 if node is None:
@@ -78,7 +86,10 @@ def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
                 edge=("customer-"+str(row["customer"].get("id")), "claim-"+str(row["related"].get("id")), "submitted")
                 if edge not in seen_edges:
                     seen_edges.add(edge); edges.append({"source":edge[0],"target":edge[1],"relationship":edge[2]})
-    driver.close()
+    except Exception:
+        return {"nodes": [], "edges": []}
+    finally:
+        driver.close()
     return {"nodes": nodes, "edges": edges}
 
 
@@ -88,16 +99,19 @@ def hf_request(prompt: str, *, max_tokens: int = 500) -> str | None:
     if not token or not model:
         return None
     url = f"https://api-inference.huggingface.co/models/{model}"
-    response = requests.post(
+    try:
+        response = requests.post(
         url,
         headers={"Authorization": f"Bearer {token}"},
         json={"inputs": prompt, "parameters": {"max_new_tokens": max_tokens, "return_full_text": False}},
-        timeout=60,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-        return payload[0].get("generated_text") or payload[0].get("text")
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return payload[0].get("generated_text") or payload[0].get("text")
+    except (requests.RequestException, ValueError):
+        return None
     return None
 
 
@@ -114,9 +128,11 @@ def hf_embeddings(texts: list[str]) -> list[list[float]] | None:
         timeout=60,
     )
     response.raise_for_status()
-    payload = response.json()
-    if isinstance(payload, list) and payload and isinstance(payload[0], list):
-        return payload
+        payload = response.json()
+        if isinstance(payload, list) and payload and isinstance(payload[0], list):
+            return payload
+    except (requests.RequestException, ValueError):
+        return None
     return None
 
 
@@ -124,14 +140,20 @@ def chroma_collection():
     host = os.getenv("CHROMA_HOST", "").strip()
     if not host:
         return None
-    import chromadb
+    try:
+        import chromadb
+    except ImportError:
+        return None
     port = int(os.getenv("CHROMA_PORT", "8000"))
     kwargs = {"host": host, "port": port}
     api_key = os.getenv("CHROMA_API_KEY", "").strip()
     if api_key:
         kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
-    client = chromadb.HttpClient(**kwargs)
-    return client.get_or_create_collection(name=os.getenv("CHROMA_COLLECTION", "risksure_policies"))
+    try:
+        client = chromadb.HttpClient(**kwargs)
+        return client.get_or_create_collection(name=os.getenv("CHROMA_COLLECTION", "risksure_policies"))
+    except Exception:
+        return None
 
 
 def index_policy_chunks(policy_id: int, chunks: list[str]) -> int:
@@ -144,8 +166,11 @@ def index_policy_chunks(policy_id: int, chunks: list[str]) -> int:
     kwargs = {"ids": ids, "documents": chunks, "metadatas": metadata}
     if embeddings:
         kwargs["embeddings"] = embeddings
-    collection.upsert(**kwargs)
-    return len(chunks)
+    try:
+        collection.upsert(**kwargs)
+        return len(chunks)
+    except Exception:
+        return 0
 
 
 def retrieve_policy_chunks(policy_id: int, question: str, n_results: int = 4) -> list[dict]:
@@ -159,7 +184,10 @@ def retrieve_policy_chunks(policy_id: int, question: str, n_results: int = 4) ->
         kwargs["query_embeddings"] = embeddings
     else:
         kwargs["query_texts"] = [question]
-    result = collection.query(**kwargs)
+    try:
+        result = collection.query(**kwargs)
+    except Exception:
+        return []
     docs = (result.get("documents") or [[]])[0]
     metas = (result.get("metadatas") or [[]])[0]
     return [{"text": d, "section": (m or {}).get("section")} for d, m in zip(docs, metas)]
