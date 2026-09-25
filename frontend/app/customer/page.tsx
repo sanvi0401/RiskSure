@@ -1,12 +1,4 @@
-import { RoleGuard } from "@/components/auth/role-guard"
-
-export default function CustomerDashboardPage() {
-  return (
-    <RoleGuard allowedRoles={["customer"]}>
-      <div className="space-y-4">
-        <h1 className="text-3xl font-semibold">Customer Portal</h1>
-        <p className="text-muted-foreground">Policies, claims, documents, coverage and premium information.</p>
-      </div>
-    </RoleGuard>
-  )
-}
+"use client"
+import{useEffect,useState}from"react";import{DashboardLayout}from"@/components/layout/dashboard-layout";import{RoleGuard}from"@/components/auth/role-guard";import{apiFetch,API_ENDPOINTS}from"@/lib/api"
+export default function Page(){return <RoleGuard allowedRoles={["customer"]}><C/></RoleGuard>}
+function C(){const[d,setD]=useState<any>(null);useEffect(()=>{apiFetch(API_ENDPOINTS.customerPortal).then(x=>x.json()).then(setD)},[]);return <DashboardLayout title="Customer Portal" subtitle="Your insurance workspace">{d?<div className="grid gap-6 md:grid-cols-3"><section className="glass-panel rounded-[2rem] p-6"><p className="text-xs text-muted-foreground">PROFILE</p><h2 className="mt-3 text-2xl font-semibold">{d.profile.full_name}</h2><p className="mt-3">{d.profile.city}, {d.profile.state}</p></section><section className="glass-panel rounded-[2rem] p-6"><p className="text-xs text-muted-foreground">POLICIES</p><b className="mt-3 block text-4xl">{d.policies.length}</b>{d.policies.map((x:any)=><p key={x.id} className="mt-3 text-sm">{x.policy_number} · {x.status}</p>)}</section><section className="glass-panel rounded-[2rem] p-6"><p className="text-xs text-muted-foreground">CLAIMS</p><b className="mt-3 block text-4xl">{d.claims.length}</b>{d.claims.map((x:any)=><p key={x.id} className="mt-3 text-sm">{x.claim_number} · {x.status}</p>)}</section></div>:<p>Loading...</p>}</DashboardLayout>}
