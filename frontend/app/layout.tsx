@@ -46,9 +46,11 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${sora.variable} ${plexMono.variable} font-sans antialiased`}>
-        <ApplicationProvider>
-          {children}
-        </ApplicationProvider>
+        <AuthProvider>
+          <ApplicationProvider>
+            {children}
+          </ApplicationProvider>
+        </AuthProvider>
         <Analytics />
       </body>
     </html>
