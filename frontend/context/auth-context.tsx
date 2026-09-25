@@ -58,7 +58,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.localStorage.setItem("risksure_user", JSON.stringify(data.user))
   }
 
-  const hasRole = (roles: UserRole | UserRole[]) => {\n    if (!user) return false\n    const allowed = Array.isArray(roles) ? roles : [roles]\n    return allowed.includes(user.role)\n  }\n\n  const logout = () => {
+  const hasRole = (roles: UserRole | UserRole[]) => {
+    if (!user) return false
+    const allowed = Array.isArray(roles) ? roles : [roles]
+    return allowed.includes(user.role)
+  }
+
+  const logout = () => {
     setToken(null)
     setUser(null)
     window.localStorage.removeItem("risksure_access_token")
