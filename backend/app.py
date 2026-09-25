@@ -10,6 +10,7 @@ import pyotp
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import db
+from integrations import neo4j_upsert_claim, neo4j_claim_graph, index_policy_chunks, retrieve_policy_chunks, hf_request
 from models import (
     Application,
     AuditLog,
@@ -23,7 +24,7 @@ from models import (
 
 app = Flask(__name__)\nCORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, supports_credentials=False)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///risksure.db")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "sqlite:///risksure.db"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -34,7 +35,8 @@ jwt = JWTManager(app)
 db.init_app(app)
 
 with app.app_context():
-    db.create_all()
+    if os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true":
+        db.create_all()
 
 
 VALID_ROLES = {"customer", "underwriter", "claims_officer", "provider", "admin"}
@@ -783,8 +785,12 @@ def policy_intelligence(policy_id):
     d=request.get_json() or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
+    indexed = index_policy_chunks(p.id, parts)
+    retrieved = retrieve_policy_chunks(p.id, q) if q else []
+    context = retrieved or [{"text":v,"section":i+1} for i,v in enumerate(hits)]
+    generated = hf_request("Answer the insurance policy question using only this policy text. If the answer is not specified, say so. Question: " + q + "\\nPolicy text:\\n" + "\\n".join(x["text"] for x in context)) if q else None
     audit(current_user_record().id,"policy_intelligence_query","policy",p.id,{"question":q});db.session.commit()
-    return jsonify({"policy":policy_to_dict(p),"question":q,"answer":" ".join(hits)[:4000],"sources":[{"section":i+1,"text":v} for i,v in enumerate(hits)],"retrieval":"RiskSure policy retrieval"})
+    return jsonify({"policy":policy_to_dict(p),"question":q,"answer":generated or " ".join(x["text"] for x in context)[:4000],"sources":context,"retrieval":"Chroma + Hugging Face" if retrieved else "RiskSure policy retrieval","indexed_chunks":indexed})
 
 @app.route("/fraud/investigation/<int:claim_id>",methods=["GET"])
 @roles_required("claims_officer","underwriter","admin")
@@ -797,7 +803,10 @@ def fraud_investigation(claim_id):
     if (c.claimed_amount or 0)>100000:signals.append({"type":"high_amount","severity":"high"})
     score=min(1.0,.2*len(signals)+.05*max(0,len(related)-1))
     audit(current_user_record().id,"fraud_investigation_viewed","claim",c.id,{"anomaly_score":score});db.session.commit()
-    nodes=[{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}];edges=[{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"submitted"}]
+    neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id})
+    graph_from_neo4j=neo4j_claim_graph(c.id)
+    nodes=graph_from_neo4j["nodes"] or [{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}]
+    edges=graph_from_neo4j["edges"] or [{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"submitted"}]
     if c.provider_id:nodes.append({"id":"provider-"+str(c.provider_id),"type":"provider"});edges.append({"source":"provider-"+str(c.provider_id),"target":"claim-"+str(c.id),"relationship":"submitted_to"})
     return jsonify({"claim":claim_to_dict(c),"graph":{"nodes":nodes,"edges":edges},"anomaly_score":round(score,3),"signals":signals,"recommendation":"Human investigation recommended." if signals else "No configured anomaly signal detected."})
 
