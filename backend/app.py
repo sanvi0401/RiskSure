@@ -192,10 +192,8 @@ def home():
 def health():
     return jsonify({
         "status": "ok",
+        "service": "RiskSure backend",
         "model_loaded": model_loaded,
-        "saved_applications": Application.query.count(),
-        "claims": Claim.query.count(),
-        "policies": Policy.query.count(),
     })
 
 
@@ -222,6 +220,31 @@ def register():
     audit(user.id, "account_created", "user", user.id)
     db.session.commit()
     return jsonify({"message": "Account created", "user": user.to_dict()}), 201
+
+
+@app.route("/auth/password/reset-with-totp", methods=["POST"])
+@limiter.limit("5 per minute")
+def reset_password_with_totp():
+    data = request.get_json() or {}
+    email = str(data.get("email", "")).strip().lower()
+    code = str(data.get("code", "")).replace(" ", "")
+    new_password = str(data.get("new_password", ""))
+
+    if not email or len(code) != 6 or len(new_password) < 8:
+        return jsonify({"error": "Email, 6-digit authenticator code and a password of at least 8 characters are required"}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if user is None or not user.totp_enabled or not user.totp_secret:
+        return jsonify({"error": "Google Authenticator is not enabled for this account"}), 400
+
+    if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
+        return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
+
+    user.set_password(new_password)
+    audit(user.id, "password_reset_with_totp", "user", user.id)
+    db.session.commit()
+    return jsonify({"message": "Password reset successfully"})
+
 
 
 @app.route("/auth/password/reset-with-recovery", methods=["POST"])
