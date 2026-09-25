@@ -1,12 +1,12 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ArrowRight, Loader2, Shield, Sparkles, Waves } from "lucide-react"
-import { useAuth } from "@/context/auth-context"
+import { useAuth } from "@/context/auth-context"\nimport { QRCodeSVG } from "qrcode.react"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -35,6 +35,81 @@ export default function LoginPage() {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const submitTotp = async () => {
+    setError("")
+    setIsLoading(true)
+    try {
+      if (authStep === "setup") {
+        const codes = await verifyTotpSetup(setupToken, code)
+        setRecoveryCodes(codes)
+      } else {
+        await verifyTotp(challenge, code)
+        router.push("/dashboard")
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Verification failed")
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  if (authStep === "totp" || authStep === "setup") {
+    return (
+      <div className="app-shell flex min-h-screen items-center justify-center px-4 py-8">
+        <section className="glass-panel w-full max-w-lg rounded-[2rem] p-8 lg:p-10">
+          <div className="flex h-16 w-16 items-center justify-center rounded-[1.4rem] bg-primary text-primary-foreground">
+            <Shield className="h-8 w-8" />
+          </div>
+          <h1 className="mt-6 text-3xl font-semibold tracking-[-0.05em] text-foreground">
+            {authStep === "setup" ? "Set up Google Authenticator" : "Enter your authenticator code"}
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            {authStep === "setup"
+              ? "Scan this QR code with Google Authenticator, then enter the 6-digit code it generates."
+              : "Open Google Authenticator and enter the current 6-digit RiskSure code."}
+          </p>
+
+          {authStep === "setup" && setupUri && (
+            <div className="mt-8 flex flex-col items-center gap-5">
+              <div className="rounded-3xl bg-white p-5">
+                <QRCodeSVG value={setupUri} size={220} />
+              </div>
+              <div className="w-full rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Manual setup key</p>
+                <p className="mt-2 break-all font-mono text-sm text-foreground">{setupSecret}</p>
+              </div>
+            </div>
+          )}
+
+          {recoveryCodes.length === 0 ? (
+            <>
+              <Input
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="000000"
+                className="mt-8 h-14 rounded-2xl text-center text-2xl tracking-[0.5em]"
+              />
+              {error && <p className="mt-4 rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</p>}
+              <Button onClick={submitTotp} disabled={isLoading || code.length !== 6} className="mt-6 h-12 w-full rounded-2xl bg-primary text-primary-foreground">
+                {isLoading ? "Verifying..." : "Verify code"}
+              </Button>
+            </>
+          ) : (
+            <div className="mt-8">
+              <p className="text-sm font-medium text-foreground">Save these recovery codes somewhere safe. Each can be used once.</p>
+              <div className="mt-4 grid gap-2 rounded-2xl border border-white/10 bg-white/5 p-4">
+                {recoveryCodes.map((item) => <code key={item} className="font-mono text-sm text-foreground">{item}</code>)}
+              </div>
+              <Button onClick={() => router.push("/dashboard")} className="mt-6 h-12 w-full rounded-2xl bg-primary text-primary-foreground">Continue to RiskSure</Button>
+            </div>
+          )}
+        </section>
+      </div>
+    )
   }
 
   return (
