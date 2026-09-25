@@ -6,7 +6,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { useApplication } from "@/context/application-context"
-import { API_ENDPOINTS } from "@/lib/api"
+import { API_ENDPOINTS, apiFetch } from "@/lib/api"
 import { ArrowLeft, Save, Loader2, CheckCircle } from "lucide-react"
 
 export default function FinalPage() {
@@ -34,7 +34,7 @@ export default function FinalPage() {
         premium: applicationData.premium,
       }
 
-      const response = await fetch(API_ENDPOINTS.save, {
+      const response = await apiFetch(API_ENDPOINTS.save, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
