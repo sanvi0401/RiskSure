@@ -3,6 +3,7 @@ from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt
 import joblib
 import numpy as np
 import os
+import json
 
 from database import db
 from models import Application, User
@@ -34,7 +35,8 @@ def add_cors_headers(response):
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 model_loaded = False
 model = None
-scaler = None
+explainer = None
+feature_names = ["age", "sex", "bmi", "children", "smoker", "region"]
 min_charge = 1000.0
 max_charge = 50000.0
 
@@ -47,15 +49,24 @@ try:
     print(f"Scikit-Learn Version: {sklearn.__version__}")
     print("-------------------------")
 
-    model = joblib.load(os.path.join(MODEL_DIR, "insurance_model.pkl"))
-    scaler = joblib.load(os.path.join(MODEL_DIR, "insurance_scaler.pkl"))
+    from xgboost import XGBRegressor
+    import shap
+
+    model = XGBRegressor()
+    model.load_model(os.path.join(MODEL_DIR, "insurance_xgb_model.json"))
+    explainer = shap.TreeExplainer(model)
     risk_bounds = joblib.load(os.path.join(MODEL_DIR, "risk_bounds.pkl"))
 
     min_charge = risk_bounds.get("min_charge", 0) if isinstance(risk_bounds, dict) else risk_bounds[0]
     max_charge = risk_bounds.get("max_charge", 1) if isinstance(risk_bounds, dict) else risk_bounds[1]
 
+    metadata_path = os.path.join(MODEL_DIR, "feature_metadata.json")
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as metadata_file:
+            feature_names = json.load(metadata_file).get("features", feature_names)
+
     model_loaded = True
-    print("ML Model loaded successfully")
+    print("XGBoost underwriting model loaded successfully")
 except Exception as error:
     print("ERROR loading ML model:", error)
     model_loaded = False
@@ -132,63 +143,81 @@ def staff_only():
 
 
 @app.route("/process", methods=["POST"])
+@jwt_required()
 def process():
-    data = request.get_json()
+    data = request.get_json() or {}
 
-    age = data.get("age", 0)
+    age = float(data.get("age", 0))
     sex_raw = data.get("sex", "male")
-    bmi = data.get("bmi", 0.0)
-    children = data.get("children", 0)
+    bmi = float(data.get("bmi", 0.0))
+    children = float(data.get("children", 0))
     smoker_raw = data.get("smoker", "no")
     region_raw = data.get("region", "southwest")
 
     sex = 1 if str(sex_raw).lower() == "male" else 0
     smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
-
     region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
     region = region_map.get(str(region_raw).lower(), 0)
 
-    input_array = np.array([[age, sex, bmi, children, smoker, region]])
-    if model_loaded is False:
-        return jsonify({"error": "ML model not loaded", "model_status": "failed"}), 503
+    input_array = np.array([[age, sex, bmi, children, smoker, region]], dtype=float)
 
-    print("Running real ML prediction...")
-    scaled_input = scaler.transform(input_array)
-    prediction = model.predict(scaled_input)[0]
+    if not model_loaded:
+        return jsonify({"error": "XGBoost underwriting model not loaded", "model_status": "failed"}), 503
 
-    risk_score = (prediction - min_charge) / (max_charge - min_charge)
+    prediction = float(model.predict(input_array)[0])
+    risk_score = (prediction - min_charge) / max(max_charge - min_charge, 1.0)
     risk_score = max(0.0, min(1.0, float(risk_score)))
 
+    rule_adjustments = []
     rule_adjustment = 0.0
+
     if smoker == 1:
         rule_adjustment += 0.20
+        rule_adjustments.append({"rule": "smoker", "adjustment": 0.20, "reason": "Smoking status increases modeled risk."})
     if bmi > 30:
         rule_adjustment += 0.05
+        rule_adjustments.append({"rule": "high_bmi", "adjustment": 0.05, "reason": "BMI is above 30."})
     if children > 2:
         rule_adjustment += 0.05
+        rule_adjustments.append({"rule": "dependents", "adjustment": 0.05, "reason": "More than two dependents are present."})
 
-    final_risk = risk_score + rule_adjustment
+    final_risk = min(1.0, risk_score + rule_adjustment)
 
     if final_risk < 0.5:
         decision = "Approved"
-    elif 0.5 <= final_risk <= 0.9:
+    elif final_risk <= 0.9:
         decision = "Approved with Conditions"
     else:
         decision = "Manual Review"
 
-    base_premium = 5000.0
-    premium = base_premium * (1.0 + risk_score + rule_adjustment)
+    premium = 5000.0 * (1.0 + final_risk)
+
+    shap_explanation = []
+    if explainer is not None:
+        shap_values = explainer(input_array)
+        contributions = np.asarray(shap_values.values[0], dtype=float)
+        for name, contribution in zip(feature_names, contributions):
+            shap_explanation.append({
+                "feature": name,
+                "contribution": round(float(contribution), 4),
+                "direction": "increases" if contribution > 0 else "decreases" if contribution < 0 else "neutral",
+            })
+        shap_explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
 
     return jsonify({
-        "predicted_charge": float(prediction),
-        "risk_score": float(risk_score),
-        "rule_adjustment": float(rule_adjustment),
-        "final_risk": float(final_risk),
+        "predicted_charge": prediction,
+        "risk_score": round(risk_score, 4),
+        "rule_adjustment": round(rule_adjustment, 4),
+        "applied_rules": rule_adjustments,
+        "final_risk": round(final_risk, 4),
         "decision": decision,
-        "premium": float(premium),
-        "model_status": "real",
+        "premium": round(premium, 2),
+        "model_status": "xgboost",
+        "explanation": {
+            "method": "SHAP",
+            "features": shap_explanation,
+        },
     })
-
 
 @app.route("/save", methods=["POST"])
 @jwt_required()
