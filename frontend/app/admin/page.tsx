@@ -1,12 +1,4 @@
-import { RoleGuard } from "@/components/auth/role-guard"
-
-export default function AdminDashboardPage() {
-  return (
-    <RoleGuard allowedRoles={["admin"]}>
-      <div className="space-y-4">
-        <h1 className="text-3xl font-semibold">Admin Centre</h1>
-        <p className="text-muted-foreground">Users, policies, claims, investigations, models and audit controls.</p>
-      </div>
-    </RoleGuard>
-  )
-}
+"use client"
+import{useEffect,useState}from"react";import{DashboardLayout}from"@/components/layout/dashboard-layout";import{RoleGuard}from"@/components/auth/role-guard";import{apiFetch,API_ENDPOINTS}from"@/lib/api"
+export default function Page(){return <RoleGuard allowedRoles={["admin"]}><A/></RoleGuard>}
+function A(){const[o,setO]=useState<any>({}),[u,setU]=useState<any[]>([]),[l,setL]=useState<any[]>([]);const load=()=>{apiFetch(API_ENDPOINTS.adminOverview).then(x=>x.json()).then(setO);apiFetch(API_ENDPOINTS.adminUsers).then(x=>x.json()).then(setU);apiFetch(API_ENDPOINTS.adminAudit).then(x=>x.json()).then(setL)};useEffect(load,[]);const role=async(id:number,r:string)=>{await apiFetch("/admin/users/"+id+"/role",{method:"PUT",body:JSON.stringify({role:r})});load()};return <DashboardLayout title="Admin Centre" subtitle="Governance, users and audit trail"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">{Object.entries(o).map(([k,v])=><div key={k} className="glass-panel rounded-2xl p-5"><p className="text-xs uppercase text-muted-foreground">{k}</p><b className="mt-2 block text-3xl">{String(v)}</b></div>)}</div><div className="mt-6 grid gap-6 lg:grid-cols-2"><section className="glass-panel rounded-[2rem] p-6"><h2 className="text-2xl font-semibold">Users & roles</h2><div className="mt-5 space-y-3">{u.map(x=><div key={x.id} className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 p-3"><div><b>{x.email}</b><p className="text-xs text-muted-foreground">#{x.id}</p></div><select value={x.role} onChange={e=>role(x.id,e.target.value)} className="rounded-xl border bg-background p-2 text-sm"><option>customer</option><option>underwriter</option><option>claims_officer</option><option>provider</option><option>admin</option></select></div>)}</div></section><section className="glass-panel rounded-[2rem] p-6"><h2 className="text-2xl font-semibold">Audit log</h2><div className="mt-5 max-h-[500px] space-y-2 overflow-auto">{l.map(x=><div key={x.id} className="rounded-xl bg-white/4 p-3 text-sm"><b>{x.action}</b><p className="text-xs text-muted-foreground">{x.entity_type} #{x.entity_id} · {x.created_at}</p></div>)}</div></section></div></DashboardLayout>}
