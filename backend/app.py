@@ -471,6 +471,67 @@ def get_applications():
     return jsonify([application.to_dict() for application in applications])
 
 
+@app.route("/underwriting/queue", methods=["GET"])
+@roles_required("underwriter", "admin")
+def underwriting_queue():
+    applications = Application.query.order_by(Application.created_at.desc()).all()
+    return jsonify([{
+        "id": a.id, "name": a.name, "age": a.age, "bmi": a.bmi, "smoker": a.smoker,
+        "final_risk": a.final_risk, "decision": a.decision, "premium": a.premium,
+        "review_status": a.review_status, "assigned_underwriter_id": a.assigned_underwriter_id,
+        "decision_reason": a.decision_reason,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+    } for a in applications])
+
+
+@app.route("/underwriting/applications/<int:application_id>/assign", methods=["PUT"])
+@roles_required("underwriter", "admin")
+def assign_underwriting(application_id):
+    user = current_user_record()
+    application = db.session.get(Application, application_id)
+    if application is None:
+        return jsonify({"error": "Application not found"}), 404
+    data = request.get_json() or {}
+    assignee_id = int(data.get("underwriter_id", user.id))
+    assignee = db.session.get(User, assignee_id)
+    if assignee is None or assignee.role not in {"underwriter", "admin"}:
+        return jsonify({"error": "Invalid underwriter"}), 400
+    application.assigned_underwriter_id = assignee.id
+    application.review_status = "in_review"
+    audit(user.id, "underwriting_assigned", "application", application.id, {"underwriter_id": assignee.id})
+    db.session.commit()
+    return jsonify({"message": "Application assigned", "application_id": application.id, "underwriter_id": assignee.id})
+
+
+@app.route("/underwriting/applications/<int:application_id>/decision", methods=["PUT"])
+@roles_required("underwriter", "admin")
+def underwriting_decision(application_id):
+    user = current_user_record()
+    application = db.session.get(Application, application_id)
+    if application is None:
+        return jsonify({"error": "Application not found"}), 404
+    if application.assigned_underwriter_id not in {None, user.id} and user.role != "admin":
+        return jsonify({"error": "Application is assigned to another underwriter"}), 403
+    data = request.get_json() or {}
+    decision = str(data.get("decision", "")).strip()
+    if decision not in {"Approved", "Approved with Conditions", "Manual Review", "Rejected"}:
+        return jsonify({"error": "Invalid underwriting decision"}), 400
+    reason = str(data.get("reason", "")).strip()
+    if not reason:
+        return jsonify({"error": "A decision reason is required"}), 400
+    application.decision = decision
+    application.decision_reason = reason
+    application.review_status = "completed" if decision != "Manual Review" else "manual_review"
+    application.reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    application.assigned_underwriter_id = user.id if application.assigned_underwriter_id is None else application.assigned_underwriter_id
+    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason})
+    db.session.commit()
+    return jsonify({"message": "Underwriting decision recorded", "application": {
+        "id": application.id, "decision": application.decision, "decision_reason": application.decision_reason,
+        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None
+    }})
+
+
 @app.route("/applications/<int:application_id>", methods=["GET"])
 @jwt_required()
 def get_application(application_id):
