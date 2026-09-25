@@ -1,6 +1,8 @@
-from datetime import timedelta\nfrom functools import wraps
+from datetime import timedelta
+from functools import wraps
 
-from flask import Flask, jsonify, request\nfrom flask_cors import CORS
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -26,7 +28,8 @@ from models import (
     User,
 )
 
-app = Flask(__name__)\nCORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, supports_credentials=False)
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, supports_credentials=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "sqlite:///risksure.db"
 if DATABASE_URL.startswith("postgres://"):
@@ -34,7 +37,10 @@ if DATABASE_URL.startswith("postgres://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-JWT_SECRET = os.getenv("JWT_SECRET_KEY")\nif not JWT_SECRET and os.getenv("FLASK_ENV") == "production":\n    raise RuntimeError("JWT_SECRET_KEY must be configured in production")\napp.config["JWT_SECRET_KEY"] = JWT_SECRET or "dev-only-change-this-secret"
+JWT_SECRET = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET and os.getenv("FLASK_ENV") == "production":
+    raise RuntimeError("JWT_SECRET_KEY must be configured in production")
+app.config["JWT_SECRET_KEY"] = JWT_SECRET or "dev-only-change-this-secret"
 jwt = JWTManager(app)
 db.init_app(app)
 migrate = Migrate(app, db)
@@ -251,7 +257,8 @@ def login():
         setup_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
     if user.totp_enabled:
-        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})\n        return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
+        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
+        return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
     return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
 
 
