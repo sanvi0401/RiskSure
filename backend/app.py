@@ -837,6 +837,42 @@ def unified_case_intelligence(application_id):
     consistency=["High-value claim requires human review."] if any((c.claimed_amount or 0)>100000 for c in claims) else []
     return jsonify({"application":a.to_dict(),"risk":{"model_score":a.risk_score,"final_risk":a.final_risk,"decision":a.decision},"policy":policy_to_dict(p) if p else None,"claims":[claim_to_dict(c) for c in claims],"relationship_signals":signals,"document_consistency":consistency,"human_review_required":bool(consistency or a.review_status in {"manual_review","in_review"})})
 
+@app.route("/graph/claim/<int:claim_id>",methods=["GET"])
+@roles_required("claims_officer","underwriter","admin")
+def claim_graph(claim_id):
+    c=db.session.get(Claim,claim_id)
+    if not c:return jsonify({"error":"Claim not found"}),404
+    related=Claim.query.filter((Claim.customer_id==c.customer_id)|(Claim.provider_id==c.provider_id)).all()
+    nodes=[];edges=[]
+    def add(n,t): 
+        if not any(x["id"]==n for x in nodes):nodes.append({"id":n,"type":t})
+    add("customer-"+str(c.customer_id),"customer")
+    for x in related:
+        add("claim-"+str(x.id),"claim");edges.append({"source":"customer-"+str(c.customer_id),"target":"claim-"+str(x.id),"relationship":"submitted"})
+        if x.provider_id:
+            add("provider-"+str(x.provider_id),"provider");edges.append({"source":"provider-"+str(x.provider_id),"target":"claim-"+str(x.id),"relationship":"submitted_to"})
+    return jsonify({"nodes":nodes,"edges":edges})
+
+@app.route("/claims/<int:claim_id>/intelligence",methods=["POST"])
+@roles_required("claims_officer","underwriter","admin")
+def claim_intelligence(claim_id):
+    c=db.session.get(Claim,claim_id)
+    if not c:return jsonify({"error":"Claim not found"}),404
+    d=request.get_json() or {};text=str(d.get("document_text","")).strip()
+    extracted={"claim_number":c.claim_number,"claimed_amount":c.claimed_amount,"document_present":bool(text)}
+    signals=[]
+    if text and c.claimed_amount and str(c.claimed_amount) not in text:signals.append("Claimed amount was not found verbatim in supplied document.")
+    if c.claimed_amount and c.claimed_amount>100000:signals.append("High-value claim requires human review.")
+    return jsonify({"claim":claim_to_dict(c),"extracted":extracted,"signals":signals,"human_review_required":bool(signals)})
+
+@app.route("/cases/<int:application_id>/review",methods=["GET"])
+@roles_required("underwriter","claims_officer","admin")
+def case_review(application_id):
+    a=db.session.get(Application,application_id)
+    if not a:return jsonify({"error":"Application not found"}),404
+    intelligence=unified_case_intelligence(application_id)
+    return intelligence
+
 if __name__ == "__main__":
     print("Starting Flask server...")
     print(f"Model loaded: {model_loaded}")
