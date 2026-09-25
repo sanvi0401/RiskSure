@@ -1,2 +1,9 @@
-"""Vercel entrypoint for the RiskSure Flask backend."""
-from backend.app import app
+"""Root Vercel entrypoint for RiskSure."""
+import os
+import sys
+
+BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend")
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from app import app
