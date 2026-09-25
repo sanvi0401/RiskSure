@@ -395,7 +395,7 @@ def process():
 
     premium = 5000.0 * (1.0 + final_risk)
     shap_explanation = []
-    if explainer is not None:
+    if explainer is not None and model is not None:
         shap_values = explainer([[age, sex, bmi, children, smoker, region]])
         contributions = list(shap_values.values[0])
         for name, contribution in zip(feature_names, contributions):
