@@ -60,7 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!response.ok) throw new Error(data.error || "Login failed")
 
     if (data.totp_setup_required) return { type: "setup" as const, user: data.user, setupToken: data.setup_token }
-    if (data.requires_totp) return { type: "totp" as const, user: data.user, challenge: String(data.user_id) }
+    if (data.requires_totp) return { type: "totp" as const, user: data.user, challenge: data.challenge_token }
     storeSession(data.access_token, data.user)
     return { type: "complete" as const, user: data.user }
   }
@@ -69,7 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response = await fetch(`${API_BASE_URL}/auth/login/verify-totp`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: Number(challenge), code }),
+      body: JSON.stringify({ code }),
     })
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || "Invalid authenticator code")
