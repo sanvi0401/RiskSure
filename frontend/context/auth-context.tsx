@@ -16,7 +16,7 @@ interface AuthContextType {
   user: AuthUser | null
   token: string | null
   isLoading: boolean
-  login: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<{ type: "complete" | "totp" | "setup"; user: AuthUser; challenge?: string; setupToken?: string }>\n  verifyTotp: (challenge: string, code: string) => Promise<void>\n  verifyTotpSetup: (setupToken: string, code: string) => Promise<string[]>
   logout: () => void
   hasRole: (roles: UserRole | UserRole[]) => boolean
 }
@@ -43,6 +43,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(false)
   }, [])
 
+  const storeSession = (accessToken: string, nextUser: AuthUser) => {
+    setToken(accessToken)
+    setUser(nextUser)
+    window.localStorage.setItem("risksure_access_token", accessToken)
+    window.localStorage.setItem("risksure_user", JSON.stringify(nextUser))
+  }
+
   const login = async (email: string, password: string) => {
     const response = await fetch(`${API_BASE_URL}/auth/login`, {
       method: "POST",
@@ -52,34 +59,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || "Login failed")
 
-    setToken(data.access_token)
-    setUser(data.user)
-    window.localStorage.setItem("risksure_access_token", data.access_token)
-    window.localStorage.setItem("risksure_user", JSON.stringify(data.user))
+    if (data.totp_setup_required) return { type: "setup" as const, user: data.user, setupToken: data.setup_token }
+    if (data.requires_totp) return { type: "totp" as const, user: data.user, challenge: String(data.user_id) }
+    storeSession(data.access_token, data.user)
+    return { type: "complete" as const, user: data.user }
   }
 
-  const hasRole = (roles: UserRole | UserRole[]) => {
-    if (!user) return false
-    const allowed = Array.isArray(roles) ? roles : [roles]
-    return allowed.includes(user.role)
+  const verifyTotp = async (challenge: string, code: string) => {
+    const response = await fetch(`${API_BASE_URL}/auth/login/verify-totp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: Number(challenge), code }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || "Invalid authenticator code")
+    storeSession(data.access_token, data.user)
   }
 
-  const logout = () => {
-    setToken(null)
-    setUser(null)
-    window.localStorage.removeItem("risksure_access_token")
-    window.localStorage.removeItem("risksure_user")
+  const verifyTotpSetup = async (setupToken: string, code: string) => {
+    const response = await fetch(`${API_BASE_URL}/auth/totp/verify-setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${setupToken}` },
+      body: JSON.stringify({ code }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || "Invalid authenticator code")
+    storeSession(data.access_token, data.user)
+    return data.recovery_codes as string[]
   }
-
-  return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout, hasRole }}>
-      {children}
-    </AuthContext.Provider>
-  )
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext)
-  if (!context) throw new Error("useAuth must be used within AuthProvider")
-  return context
-}
