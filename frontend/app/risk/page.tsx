@@ -14,10 +14,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useApplication } from "@/context/application-context"
-import { API_ENDPOINTS } from "@/lib/api"
+import { apiJson, API_ENDPOINTS } from "@/lib/api"
 import { ArrowRight, Loader2, Activity, AlertCircle, Sparkles } from "lucide-react"
-
-const BASE_PREMIUM = 5000
 
 export default function RiskPage() {
   const router = useRouter()
@@ -42,7 +40,6 @@ export default function RiskPage() {
 
   const calculateRisk = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
-    console.log("BUTTON CLICKED")
     if (!validate()) return
 
     setIsCalculating(true)
@@ -56,14 +53,12 @@ export default function RiskPage() {
         region,
       }
 
-      const response = await fetch(API_ENDPOINTS.process, {
+      const data = await apiJson(API_ENDPOINTS.process, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(localStorage.getItem("risksure_access_token") ? { Authorization: `Bearer ${localStorage.getItem("risksure_access_token")}` } : {}) },
         body: JSON.stringify(payload),
       })
 
-      if (response.ok) {
-        const data = await response.json()
+      {
         const appliedRules = []
         if (smoker === "yes") appliedRules.push({ rule: "Smoker = Yes", adjustment: 0.2 })
         if (parseFloat(bmi) > 30) appliedRules.push({ rule: "BMI > 30", adjustment: 0.05 })
@@ -82,23 +77,6 @@ export default function RiskPage() {
           appliedRules,
           modelStatus: data.model_status,
           explanation: data.explanation ?? { method: "", features: [] },
-        })
-      } else {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || "Risk service unavailable")
-        const simulatedScore = Math.random() * 0.6 + 0.2
-        setRiskScore(simulatedScore)
-        setApplicationData({
-          bmi: parseFloat(bmi),
-          children: parseInt(children),
-          smoker,
-          region,
-          riskScore: simulatedScore,
-          ruleAdjustment: 0,
-          finalRisk: simulatedScore,
-          decision: "Approved",
-          premium: BASE_PREMIUM * (1 + simulatedScore),
-          appliedRules: [],
         })
       }
     } catch (error) {
