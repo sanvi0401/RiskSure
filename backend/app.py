@@ -10,14 +10,14 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
-from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
 import os
 import json
 import pyotp
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import db
-from integrations import neo4j_upsert_claim, neo4j_claim_graph, index_policy_chunks, retrieve_policy_chunks, hf_request
+from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_upsert_claim, retrieve_policy_chunks
 from models import (
     Application,
     AuditLog,
