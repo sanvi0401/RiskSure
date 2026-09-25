@@ -31,7 +31,15 @@ from models import (
 )
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": os.getenv("FRONTEND_ORIGIN", "*")}}, supports_credentials=False)
+_frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip()
+_allowed_origins = ["https://risk-sure-od3i.vercel.app"]
+if _frontend_origin and _frontend_origin not in _allowed_origins:
+    _allowed_origins.append(_frontend_origin)
+CORS(
+    app,
+    resources={r"/*": {"origins": _allowed_origins}},
+    supports_credentials=False,
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "sqlite:///risksure.db"
 if DATABASE_URL.startswith("postgres://"):
@@ -214,6 +222,34 @@ def register():
     audit(user.id, "account_created", "user", user.id)
     db.session.commit()
     return jsonify({"message": "Account created", "user": user.to_dict()}), 201
+
+
+@app.route("/auth/password/reset-with-recovery", methods=["POST"])
+@limiter.limit("5 per minute")
+def reset_password_with_recovery():
+    data = request.get_json() or {}
+    email = str(data.get("email", "")).strip().lower()
+    recovery_code = str(data.get("recovery_code", "")).strip().upper()
+    new_password = str(data.get("new_password", ""))
+
+    if not email or not recovery_code or len(new_password) < 8:
+        return jsonify({"error": "Email, recovery code and a password of at least 8 characters are required"}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if user is None:
+        return jsonify({"error": "Invalid recovery details"}), 401
+
+    hashes = recovery_hashes(user)
+    for i, hashed in enumerate(hashes):
+        if check_password_hash(hashed, recovery_code):
+            hashes.pop(i)
+            user.recovery_codes_hash = json.dumps(hashes)
+            user.set_password(new_password)
+            audit(user.id, "password_reset_with_recovery", "user", user.id)
+            db.session.commit()
+            return jsonify({"message": "Password reset successfully. You can now sign in."})
+
+    return jsonify({"error": "Invalid or already used recovery code"}), 401
 
 
 @app.route("/auth/login", methods=["POST"])
