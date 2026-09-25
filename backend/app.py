@@ -423,6 +423,9 @@ def process():
     smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
     region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
     region = region_map.get(str(region_raw).lower(), 0)
+    if age <= 0 or age > 120 or bmi <= 0 or bmi > 100 or children < 0 or children > 30:
+        return jsonify({"error": "Underwriting values are outside supported ranges"}), 400
+
     if model_loaded and model is not None:
         prediction = float(model.predict([[age, sex, bmi, children, smoker, region]])[0])
         model_status = "xgboost"
@@ -484,6 +487,21 @@ def save():
     data = request.get_json() or {}
     user = current_user_record()
 
+    required = ("name", "age", "sex", "bmi", "children", "smoker", "region", "risk_score", "final_risk", "decision", "premium")
+    if any(data.get(key) in (None, "") for key in required):
+        return jsonify({"error": "Complete application data is required"}), 400
+    try:
+        age = int(data["age"])
+        bmi = float(data["bmi"])
+        children = int(data["children"])
+        risk_score = float(data["risk_score"])
+        final_risk = float(data["final_risk"])
+        premium = float(data["premium"])
+    except (TypeError, ValueError):
+        return jsonify({"error": "Application numeric fields are invalid"}), 400
+    if age <= 0 or age > 120 or bmi <= 0 or bmi > 100 or children < 0 or risk_score < 0 or risk_score > 1 or final_risk < 0 or final_risk > 1 or premium < 0:
+        return jsonify({"error": "Application values are outside supported ranges"}), 400
+
     customer_id = None
     if user.role == "customer":
         profile = customer_for_user(user)
@@ -498,17 +516,17 @@ def save():
     application = Application(
         customer_id=customer_id,
         name=data.get("name", "Unknown"),
-        age=data.get("age"),
+        age=age,
         sex=data.get("sex"),
-        bmi=data.get("bmi"),
-        children=data.get("children"),
+        bmi=bmi,
+        children=children,
         smoker=data.get("smoker"),
         region=data.get("region"),
-        risk_score=float(data.get("risk_score", 0.0)),
+        risk_score=risk_score,
         rule_adjustment=float(data.get("rule_adjustment", 0.0)),
-        final_risk=float(data.get("final_risk", 0.0)),
+        final_risk=final_risk,
         decision=str(data.get("decision", "Unknown")),
-        premium=float(data.get("premium", 0.0)),
+        premium=premium,
     )
 
     db.session.add(application)
@@ -850,10 +868,17 @@ def policy_intelligence(policy_id):
     d=request.get_json() or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
-    indexed = index_policy_chunks(p.id, parts)
-    retrieved = retrieve_policy_chunks(p.id, q) if q else []
+    try:
+        indexed = index_policy_chunks(p.id, parts)
+        retrieved = retrieve_policy_chunks(p.id, q) if q else []
+    except Exception:
+        indexed = 0
+        retrieved = []
     context = retrieved or [{"text":v,"section":i+1} for i,v in enumerate(hits)]
-    generated = hf_request("Answer the insurance policy question using only this policy text. If the answer is not specified, say so. Question: " + q + "\\nPolicy text:\\n" + "\\n".join(x["text"] for x in context)) if q else None
+    try:
+        generated = hf_request("Answer the insurance policy question using only this policy text. If the answer is not specified, say so. Question: " + q + "\\nPolicy text:\\n" + "\\n".join(x["text"] for x in context)) if q else None
+    except Exception:
+        generated = None
     audit(current_user_record().id,"policy_intelligence_query","policy",p.id,{"question":q});db.session.commit()
     return jsonify({"policy":policy_to_dict(p),"question":q,"answer":generated or " ".join(x["text"] for x in context)[:4000],"sources":context,"retrieval":"Chroma + Hugging Face" if retrieved else "RiskSure policy retrieval","indexed_chunks":indexed})
 
@@ -868,8 +893,11 @@ def fraud_investigation(claim_id):
     if (c.claimed_amount or 0)>100000:signals.append({"type":"high_amount","severity":"high"})
     score=min(1.0,.2*len(signals)+.05*max(0,len(related)-1))
     audit(current_user_record().id,"fraud_investigation_viewed","claim",c.id,{"anomaly_score":score});db.session.commit()
-    neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id})
-    graph_from_neo4j=neo4j_claim_graph(c.id)
+    try:
+        neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id})
+        graph_from_neo4j=neo4j_claim_graph(c.id)
+    except Exception:
+        graph_from_neo4j={"nodes":[],"edges":[]}
     nodes=graph_from_neo4j["nodes"] or [{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}]
     edges=graph_from_neo4j["edges"] or [{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"submitted"}]
     if c.provider_id:nodes.append({"id":"provider-"+str(c.provider_id),"type":"provider"});edges.append({"source":"provider-"+str(c.provider_id),"target":"claim-"+str(c.id),"relationship":"submitted_to"})
@@ -887,8 +915,12 @@ def billing_list():
 @roles_required("customer","admin")
 def billing_create():
     u=current_user_record();d=request.get_json() or {}
-    try:amount=float(d["amount"])
-    except(KeyError,TypeError,ValueError):return jsonify({"error":"Valid amount is required"}),400
+    try:
+        amount = float(d["amount"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error":"Valid amount is required"}),400
+    if amount <= 0:
+        return jsonify({"error":"Amount must be greater than zero"}),400
     p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id",0)))
     if not p:return jsonify({"error":"Customer profile not found"}),404
     t=BillingTransaction(customer_id=p.id,policy_id=d.get("policy_id"),claim_id=d.get("claim_id"),transaction_type=str(d.get("transaction_type","premium")),amount=amount,status=str(d.get("status","pending")),reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
