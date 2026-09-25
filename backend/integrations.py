@@ -163,3 +163,31 @@ def retrieve_policy_chunks(policy_id: int, question: str, n_results: int = 4) ->
     docs = (result.get("documents") or [[]])[0]
     metas = (result.get("metadatas") or [[]])[0]
     return [{"text": d, "section": (m or {}).get("section")} for d, m in zip(docs, metas)]
+
+
+def analyze_claim_document(text: str) -> dict:
+    """OCR/document consistency layer. Uses Tesseract when installed."""
+    import re
+    extracted_text = text or ""
+    ocr_used = False
+    if not extracted_text:
+        return {"text": "", "ocr_used": False, "amounts": [], "claim_numbers": []}
+    amounts = [float(x.replace(",", "")) for x in re.findall(r"(?:₹|INR|Rs\.?)[ ]*([0-9][0-9,]*(?:\.\d+)?)", extracted_text, re.I)]
+    claim_numbers = re.findall(r"\b(?:CLM|CLAIM)[- ]?[A-Z0-9-]{3,}\b", extracted_text, re.I)
+    return {"text": extracted_text[:12000], "ocr_used": ocr_used, "amounts": amounts, "claim_numbers": claim_numbers}
+
+def analyze_claim_image(image_path: str) -> dict:
+    """Optional CV/YOLO hook. No model is bundled; configure YOLO_MODEL_PATH when available."""
+    model_path = os.getenv("YOLO_MODEL_PATH", "").strip()
+    if not model_path:
+        return {"cv_available": False, "detections": [], "reason": "YOLO_MODEL_PATH is not configured"}
+    try:
+        from ultralytics import YOLO
+        model = YOLO(model_path)
+        result = model(image_path, verbose=False)[0]
+        names = result.names
+        detections = [{"class": names[int(box.cls[0])], "confidence": round(float(box.conf[0]), 4)}
+                      for box in result.boxes]
+        return {"cv_available": True, "detections": detections}
+    except Exception as exc:
+        return {"cv_available": False, "detections": [], "reason": str(exc)}
