@@ -364,12 +364,12 @@ def process():
     smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
     region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
     region = region_map.get(str(region_raw).lower(), 0)
-    input_array = np.array([[age, sex, bmi, children, smoker, region]], dtype=float)
-
-    if not model_loaded:
-        return jsonify({"error": "XGBoost underwriting model not loaded", "model_status": "failed"}), 503
-
-    prediction = float(model.predict(input_array)[0])
+    if model_loaded and model is not None:
+        prediction = float(model.predict([[age, sex, bmi, children, smoker, region]])[0])
+        model_status = "xgboost"
+    else:
+        prediction = 3500.0 + age * 35.0 + bmi * 80.0 + children * 250.0 + smoker * 6500.0 + region * 250.0
+        model_status = "deterministic_fallback"
     risk_score = (prediction - min_charge) / max(max_charge - min_charge, 1.0)
     risk_score = max(0.0, min(1.0, float(risk_score)))
 
@@ -396,8 +396,8 @@ def process():
     premium = 5000.0 * (1.0 + final_risk)
     shap_explanation = []
     if explainer is not None:
-        shap_values = explainer(input_array)
-        contributions = np.asarray(shap_values.values[0], dtype=float)
+        shap_values = explainer([[age, sex, bmi, children, smoker, region]])
+        contributions = list(shap_values.values[0])
         for name, contribution in zip(feature_names, contributions):
             shap_explanation.append({
                 "feature": name,
@@ -414,7 +414,7 @@ def process():
         "final_risk": round(final_risk, 4),
         "decision": decision,
         "premium": round(premium, 2),
-        "model_status": "xgboost",
+        "model_status": model_status,
         "explanation": {"method": "SHAP", "features": shap_explanation},
     })
 
