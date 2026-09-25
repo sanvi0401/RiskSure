@@ -1,4 +1,5 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "frontend": {
       "root": "frontend/",
@@ -6,12 +7,13 @@
     },
     "backend": {
       "root": "backend/",
-      "entrypoint": "app:app"
+      "entrypoint": "app:app",
+      "framework": "flask"
     }
   },
   "rewrites": [
     {
-      "source": "/svc/api/:path*",
+      "source": "/svc/api/(.*)",
       "destination": {
         "service": "backend"
       }
