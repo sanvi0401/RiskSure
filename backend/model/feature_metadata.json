@@ -1,0 +1,26 @@
+{
+  "features": [
+    "age",
+    "sex",
+    "bmi",
+    "children",
+    "smoker",
+    "region"
+  ],
+  "categorical_mappings": {
+    "sex": {
+      "female": 0,
+      "male": 1
+    },
+    "smoker": {
+      "no": 0,
+      "yes": 1
+    },
+    "region": {
+      "southwest": 0,
+      "southeast": 1,
+      "northwest": 2,
+      "northeast": 3
+    }
+  }
+}
