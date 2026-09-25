@@ -1,12 +1,4 @@
-import { RoleGuard } from "@/components/auth/role-guard"
-
-export default function ClaimsDashboardPage() {
-  return (
-    <RoleGuard allowedRoles={["claims_officer", "admin"]}>
-      <div className="space-y-4">
-        <h1 className="text-3xl font-semibold">Claims Centre</h1>
-        <p className="text-muted-foreground">Review claims, documents, OCR results and claim assessments.</p>
-      </div>
-    </RoleGuard>
-  )
-}
+"use client"
+import{useEffect,useState}from"react";import{DashboardLayout}from"@/components/layout/dashboard-layout";import{RoleGuard}from"@/components/auth/role-guard";import{Button}from"@/components/ui/button";import{Input}from"@/components/ui/input";import{apiFetch,API_ENDPOINTS}from"@/lib/api"
+export default function Page(){return <RoleGuard allowedRoles={["claims_officer","admin"]}><C/></RoleGuard>}
+function C(){const[a,setA]=useState<any[]>([]),[s,setS]=useState<any>(null),[st,setSt]=useState(""),[amt,setAmt]=useState(""),[m,setM]=useState("");const load=()=>apiFetch(API_ENDPOINTS.claims).then(x=>x.json()).then(setA);useEffect(load,[]);const save=async()=>{if(!s)return;const b:any={};if(st)b.status=st;if(amt)b.approved_amount=Number(amt);const x=await apiFetch(API_ENDPOINTS.claim(s.id),{method:"PUT",body:JSON.stringify(b)});const z=await x.json();setM(x.ok?"Claim updated":z.error||"Failed");if(x.ok)load()};return <DashboardLayout title="Claims Centre" subtitle="Claims review and settlement"><div className="grid gap-6 lg:grid-cols-[1fr_360px]"><section className="glass-panel rounded-[2rem] p-6"><h2 className="text-2xl font-semibold">Claims queue</h2><div className="mt-5 space-y-3">{a.map(x=><button key={x.id} onClick={()=>setS(x)} className="w-full rounded-2xl border border-white/10 p-4 text-left"><div className="flex justify-between"><b>{x.claim_number}</b><span>{x.status}</span></div><p className="mt-2 text-sm text-muted-foreground">{"$"+Number(x.claimed_amount||0).toLocaleString()} · Policy #{x.policy_id}</p></button>)}</div></section><aside className="glass-panel rounded-[2rem] p-6">{s?<><h2 className="text-xl font-semibold">{s.claim_number}</h2><p className="mt-4 text-sm text-muted-foreground">{s.description||"No description supplied."}</p><select value={st} onChange={e=>setSt(e.target.value)} className="mt-5 h-11 w-full rounded-xl border bg-background px-3"><option value="">Keep status</option><option>submitted</option><option>under_review</option><option>approved</option><option>rejected</option><option>settled</option></select><Input className="mt-3" value={amt} onChange={e=>setAmt(e.target.value)} placeholder="Approved amount"/><Button className="mt-4 w-full" onClick={save}>Save decision</Button>{m&&<p className="mt-3 text-sm text-muted-foreground">{m}</p>}</>:<p className="text-muted-foreground">Select a claim.</p>}</aside></div></DashboardLayout>}
