@@ -1,12 +1,4 @@
-import { RoleGuard } from "@/components/auth/role-guard"
-
-export default function ProviderDashboardPage() {
-  return (
-    <RoleGuard allowedRoles={["provider", "admin"]}>
-      <div className="space-y-4">
-        <h1 className="text-3xl font-semibold">Provider Portal</h1>
-        <p className="text-muted-foreground">Eligibility, preauthorization, treatment and billing workflows.</p>
-      </div>
-    </RoleGuard>
-  )
-}
+"use client"
+import{useEffect,useState}from"react";import{DashboardLayout}from"@/components/layout/dashboard-layout";import{RoleGuard}from"@/components/auth/role-guard";import{apiFetch,API_ENDPOINTS}from"@/lib/api"
+export default function Page(){return <RoleGuard allowedRoles={["provider","admin"]}><P/></RoleGuard>}
+function P(){const[p,setP]=useState<any>(null),[a,setA]=useState<any[]>([]);useEffect(()=>{apiFetch(API_ENDPOINTS.provider).then(x=>x.json()).then(setP);apiFetch(API_ENDPOINTS.providerClaims).then(x=>x.json()).then(setA)},[]);return <DashboardLayout title="Provider Portal" subtitle="Provider identity and claims"><div className="grid gap-6 lg:grid-cols-2"><section className="glass-panel rounded-[2rem] p-6"><p className="text-xs text-muted-foreground">PROVIDER PROFILE</p>{p?<div className="mt-5 space-y-3"><h2 className="text-2xl font-semibold">{p.name}</h2><p>Type: {p.provider_type}</p><p>License: {p.license_number}</p><p>Status: {p.status}</p><p>{p.address}, {p.city}, {p.state}</p><p>{p.phone}</p></div>:<p>Loading...</p>}</section><section className="glass-panel rounded-[2rem] p-6"><h2 className="text-2xl font-semibold">Provider claims</h2><div className="mt-5 space-y-3">{a.map(x=><div key={x.id} className="rounded-2xl border border-white/10 p-4"><div className="flex justify-between"><b>{x.claim_number}</b><span>{x.status}</span></div><p className="mt-2 text-sm text-muted-foreground">{"$"+Number(x.claimed_amount||0).toLocaleString()} · Policy #{x.policy_id}</p></div>)}</div></section></div></DashboardLayout>}
