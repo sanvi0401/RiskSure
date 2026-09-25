@@ -751,6 +751,92 @@ def admin_overview():
     })
 
 
+
+def policy_to_dict(policy):
+    return {"id":policy.id,"policy_number":policy.policy_number,"customer_id":policy.customer_id,"provider_id":policy.provider_id,"policy_type":policy.policy_type,"status":policy.status,"coverage_limit":policy.coverage_limit,"premium_amount":policy.premium_amount,"start_date":policy.start_date.isoformat() if policy.start_date else None,"end_date":policy.end_date.isoformat() if policy.end_date else None,"terms_document":policy.terms_document}
+
+@app.route("/policies",methods=["GET"])
+@roles_required("customer","admin","underwriter","claims_officer","provider")
+def list_policies():
+    u=current_user_record(); q=Policy.query
+    if u.role=="customer":
+        p=customer_for_user(u); q=q.filter_by(customer_id=p.id) if p else q.filter_by(id=-1)
+    if u.role=="provider":
+        p=provider_for_user(u); q=q.filter_by(provider_id=p.id) if p else q.filter_by(id=-1)
+    return jsonify([policy_to_dict(p) for p in q.order_by(Policy.created_at.desc()).all()])
+
+@app.route("/policies/<int:policy_id>/document",methods=["PUT"])
+@roles_required("admin","underwriter","claims_officer")
+def policy_document(policy_id):
+    p=db.session.get(Policy,policy_id)
+    if not p:return jsonify({"error":"Policy not found"}),404
+    text=str((request.get_json() or {}).get("document_text","")).strip()
+    if not text:return jsonify({"error":"document_text is required"}),400
+    p.terms_document=text;audit(current_user_record().id,"policy_document_indexed","policy",p.id,{"characters":len(text)});db.session.commit()
+    return jsonify({"message":"Policy document indexed","policy":policy_to_dict(p)})
+
+@app.route("/policies/<int:policy_id>/intelligence",methods=["POST"])
+@roles_required("customer","admin","underwriter","claims_officer","provider")
+def policy_intelligence(policy_id):
+    p=db.session.get(Policy,policy_id)
+    if not p:return jsonify({"error":"Policy not found"}),404
+    d=request.get_json() or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
+    if not text:return jsonify({"error":"No policy document text available"}),400
+    parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
+    audit(current_user_record().id,"policy_intelligence_query","policy",p.id,{"question":q});db.session.commit()
+    return jsonify({"policy":policy_to_dict(p),"question":q,"answer":" ".join(hits)[:4000],"sources":[{"section":i+1,"text":v} for i,v in enumerate(hits)],"retrieval":"RiskSure policy retrieval"})
+
+@app.route("/fraud/investigation/<int:claim_id>",methods=["GET"])
+@roles_required("claims_officer","underwriter","admin")
+def fraud_investigation(claim_id):
+    c=db.session.get(Claim,claim_id)
+    if not c:return jsonify({"error":"Claim not found"}),404
+    related=Claim.query.filter((Claim.customer_id==c.customer_id)|(Claim.provider_id==c.provider_id)).all();signals=[]
+    if len([x for x in related if x.customer_id==c.customer_id])>=3:signals.append({"type":"repeat_customer","severity":"medium"})
+    if c.provider_id and len([x for x in related if x.provider_id==c.provider_id])>=3:signals.append({"type":"repeat_provider","severity":"medium"})
+    if (c.claimed_amount or 0)>100000:signals.append({"type":"high_amount","severity":"high"})
+    score=min(1.0,.2*len(signals)+.05*max(0,len(related)-1))
+    audit(current_user_record().id,"fraud_investigation_viewed","claim",c.id,{"anomaly_score":score});db.session.commit()
+    nodes=[{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}];edges=[{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"submitted"}]
+    if c.provider_id:nodes.append({"id":"provider-"+str(c.provider_id),"type":"provider"});edges.append({"source":"provider-"+str(c.provider_id),"target":"claim-"+str(c.id),"relationship":"submitted_to"})
+    return jsonify({"claim":claim_to_dict(c),"graph":{"nodes":nodes,"edges":edges},"anomaly_score":round(score,3),"signals":signals,"recommendation":"Human investigation recommended." if signals else "No configured anomaly signal detected."})
+
+@app.route("/billing",methods=["GET"])
+@roles_required("customer","admin")
+def billing_list():
+    u=current_user_record();q=BillingTransaction.query
+    if u.role=="customer":
+        p=customer_for_user(u);q=q.filter_by(customer_id=p.id) if p else q.filter_by(id=-1)
+    return jsonify([{"id":x.id,"policy_id":x.policy_id,"claim_id":x.claim_id,"transaction_type":x.transaction_type,"amount":x.amount,"status":x.status,"reference":x.reference,"description":x.description,"created_at":x.created_at.isoformat() if x.created_at else None} for x in q.order_by(BillingTransaction.created_at.desc()).all()])
+
+@app.route("/billing",methods=["POST"])
+@roles_required("customer","admin")
+def billing_create():
+    u=current_user_record();d=request.get_json() or {}
+    try:amount=float(d["amount"])
+    except(KeyError,TypeError,ValueError):return jsonify({"error":"Valid amount is required"}),400
+    p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id",0)))
+    if not p:return jsonify({"error":"Customer profile not found"}),404
+    t=BillingTransaction(customer_id=p.id,policy_id=d.get("policy_id"),claim_id=d.get("claim_id"),transaction_type=str(d.get("transaction_type","premium")),amount=amount,status=str(d.get("status","pending")),reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
+    db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id);db.session.commit();return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference}),201
+
+@app.route("/customer/portal",methods=["GET"])
+@roles_required("customer")
+def customer_portal():
+    u=current_user_record();p=customer_for_user(u)
+    if not p:return jsonify({"error":"Customer profile not found"}),404
+    return jsonify({"profile":{"id":p.id,"full_name":p.full_name,"phone":p.phone,"city":p.city,"state":p.state},"policies":[policy_to_dict(x) for x in Policy.query.filter_by(customer_id=p.id).all()],"claims":[claim_to_dict(x) for x in Claim.query.filter_by(customer_id=p.id).all()],"applications":[x.to_dict() for x in Application.query.filter_by(customer_id=p.id).all()]})
+
+@app.route("/cases/<int:application_id>/intelligence",methods=["GET"])
+@roles_required("underwriter","claims_officer","admin")
+def unified_case_intelligence(application_id):
+    a=db.session.get(Application,application_id)
+    if not a:return jsonify({"error":"Application not found"}),404
+    claims=Claim.query.filter_by(customer_id=a.customer_id).all() if a.customer_id else [];p=Policy.query.filter_by(customer_id=a.customer_id).first() if a.customer_id else None
+    signals=[{"claim_id":c.id,"provider_id":c.provider_id} for c in claims if c.provider_id]
+    consistency=["High-value claim requires human review."] if any((c.claimed_amount or 0)>100000 for c in claims) else []
+    return jsonify({"application":a.to_dict(),"risk":{"model_score":a.risk_score,"final_risk":a.final_risk,"decision":a.decision},"policy":policy_to_dict(p) if p else None,"claims":[claim_to_dict(c) for c in claims],"relationship_signals":signals,"document_consistency":consistency,"human_review_required":bool(consistency or a.review_status in {"manual_review","in_review"})})
+
 if __name__ == "__main__":
     print("Starting Flask server...")
     print(f"Model loaded: {model_loaded}")
