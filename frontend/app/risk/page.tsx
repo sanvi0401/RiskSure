@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select"
 import { useApplication } from "@/context/application-context"
 import { API_ENDPOINTS } from "@/lib/api"
-import { ArrowRight, Loader2, Activity, AlertCircle } from "lucide-react"
+import { ArrowRight, Loader2, Activity, AlertCircle, Sparkles } from "lucide-react"
 
 const BASE_PREMIUM = 5000
 
@@ -58,7 +58,7 @@ export default function RiskPage() {
 
       const response = await fetch(API_ENDPOINTS.process, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(localStorage.getItem("risksure_access_token") ? { Authorization: `Bearer ${localStorage.getItem("risksure_access_token")}` } : {}) },
         body: JSON.stringify(payload),
       })
 
@@ -80,9 +80,12 @@ export default function RiskPage() {
           decision: data.decision,
           premium: data.premium,
           appliedRules,
+          modelStatus: data.model_status,
+          explanation: data.explanation ?? { method: "", features: [] },
         })
       } else {
-        // Simulate risk score if API is not available
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || "Risk service unavailable")
         const simulatedScore = Math.random() * 0.6 + 0.2
         setRiskScore(simulatedScore)
         setApplicationData({
@@ -98,22 +101,9 @@ export default function RiskPage() {
           appliedRules: [],
         })
       }
-    } catch {
-      // Simulate risk score if API fails
-      const simulatedScore = Math.random() * 0.6 + 0.2
-      setRiskScore(simulatedScore)
-      setApplicationData({
-        bmi: parseFloat(bmi),
-        children: parseInt(children),
-        smoker,
-        region,
-        riskScore: simulatedScore,
-        ruleAdjustment: 0,
-        finalRisk: simulatedScore,
-        decision: "Approved",
-        premium: BASE_PREMIUM * (1 + simulatedScore),
-        appliedRules: [],
-      })
+    } catch (error) {
+      console.error("Risk calculation failed:", error)
+      setErrors((current) => ({ ...current, api: "Risk calculation failed. Make sure the backend is running and you are signed in." }))
     } finally {
       setIsCalculating(false)
     }
@@ -135,7 +125,7 @@ export default function RiskPage() {
               </div>
             )}
 
-            <form onSubmit={calculateRisk} className="flex flex-col gap-5">
+            {errors.api && <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{errors.api}</div>}\n\n            <form onSubmit={calculateRisk} className="flex flex-col gap-5">
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="bmi" className="text-sm font-medium text-foreground">

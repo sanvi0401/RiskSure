@@ -16,6 +16,11 @@ export interface ApplicationData {
   finalRisk: number
   decision: string
   premium: number
+  modelStatus: string
+  explanation: {
+    method: string
+    features: { feature: string; contribution: number; direction: string }[]
+  }
 }
 
 interface ApplicationContextType {
@@ -38,6 +43,8 @@ const defaultApplicationData: ApplicationData = {
   finalRisk: 0,
   decision: "",
   premium: 0,
+  modelStatus: "",
+  explanation: { method: "", features: [] },
 }
 
 const ApplicationContext = createContext<ApplicationContextType | undefined>(undefined)
