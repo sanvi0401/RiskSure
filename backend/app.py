@@ -166,38 +166,10 @@ feature_names = ["age", "sex", "bmi", "children", "smoker", "region"]
 min_charge = 1000.0
 max_charge = 50000.0
 
-print("Attempting to load ML model...")
-try:
-    import sklearn
-
-    print("--- ENVIRONMENT DEBUG ---")
-    print(f"NumPy Version: {np.__version__}")
-    print(f"Scikit-Learn Version: {sklearn.__version__}")
-    print("-------------------------")
-
-    from xgboost import XGBRegressor
-    model = XGBRegressor()
-    model.load_model(os.path.join(MODEL_DIR, "insurance_xgb_model.json"))
-    try:
-        import shap
-        explainer = shap.TreeExplainer(model)
-    except Exception:
-        explainer = None
-    risk_bounds = joblib.load(os.path.join(MODEL_DIR, "risk_bounds.pkl"))
-
-    min_charge = risk_bounds.get("min_charge", 0) if isinstance(risk_bounds, dict) else risk_bounds[0]
-    max_charge = risk_bounds.get("max_charge", 1) if isinstance(risk_bounds, dict) else risk_bounds[1]
-
-    metadata_path = os.path.join(MODEL_DIR, "feature_metadata.json")
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r", encoding="utf-8") as metadata_file:
-            feature_names = json.load(metadata_file).get("features", feature_names)
-
-    model_loaded = True
-    print("XGBoost underwriting model loaded successfully")
-except Exception as error:
-    print("ERROR loading ML model:", error)
-    model_loaded = False
+print("ML model packages are kept outside the Vercel runtime to keep the function within size limits.")
+model_loaded = False
+model = None
+explainer = None
 
 
 @app.route("/")
