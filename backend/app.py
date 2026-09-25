@@ -877,6 +877,17 @@ def case_review(application_id):
 def detailed_health():
     return jsonify({"status":"ok","database":db.session.execute(db.text("SELECT 1")).scalar()==1,"model_loaded":model is not None,"environment":os.getenv("FLASK_ENV","development")})
 
+@app.route("/integrations/status",methods=["GET"])
+@roles_required("admin")
+def integrations_status():
+    return jsonify({
+        "postgres": bool(os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")),
+        "neo4j": bool(os.getenv("NEO4J_URI") and os.getenv("NEO4J_USERNAME") and os.getenv("NEO4J_PASSWORD")),
+        "huggingface": bool(os.getenv("HUGGINGFACE_API_TOKEN")),
+        "chroma": bool(os.getenv("CHROMA_HOST")),
+        "frontend_origin": bool(os.getenv("FRONTEND_ORIGIN"))
+    })
+
 if __name__ == "__main__":
     print("Starting Flask server...")
     print(f"Model loaded: {model_loaded}")
