@@ -47,18 +47,12 @@ export default function FinalPage() {
           router.push("/dashboard")
         }, 1500)
       } else {
-        setIsSaved(true)
-        setTimeout(() => {
-          resetApplication()
-          router.push("/dashboard")
-        }, 1500)
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || "Unable to save application")
       }
-    } catch {
-      setIsSaved(true)
-      setTimeout(() => {
-        resetApplication()
-        router.push("/dashboard")
-      }, 1500)
+    } catch (error) {
+      console.error("Application save failed:", error)
+      setError(error instanceof Error ? error.message : "Unable to save application")
     }
   }
 
