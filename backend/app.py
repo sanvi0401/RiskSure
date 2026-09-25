@@ -1,14 +1,23 @@
 from functools import wraps
 
 from flask import Flask, jsonify, request
-from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 import joblib
 import numpy as np
 import os
 import json
 
 from database import db
-from models import Application, User, CustomerProfile
+from models import (
+    Application,
+    AuditLog,
+    BillingTransaction,
+    Claim,
+    CustomerProfile,
+    Policy,
+    Provider,
+    User,
+)
 
 app = Flask(__name__)
 
@@ -60,6 +69,39 @@ def roles_required(*allowed_roles):
 
 def customer_for_user(user):
     return CustomerProfile.query.filter_by(user_id=user.id).first()
+
+
+def audit(user_id, action, entity_type=None, entity_id=None, details=None):
+    entry = AuditLog(
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        details=json.dumps(details) if isinstance(details, (dict, list)) else details,
+    )
+    db.session.add(entry)
+
+
+def claim_to_dict(claim):
+    return {
+        "id": claim.id,
+        "claim_number": claim.claim_number,
+        "customer_id": claim.customer_id,
+        "policy_id": claim.policy_id,
+        "provider_id": claim.provider_id,
+        "status": claim.status,
+        "claimed_amount": claim.claimed_amount,
+        "approved_amount": claim.approved_amount,
+        "assigned_officer_id": claim.assigned_officer_id,
+        "incident_date": claim.incident_date.isoformat() if claim.incident_date else None,
+        "description": claim.description,
+        "created_at": claim.created_at.isoformat() if claim.created_at else None,
+        "updated_at": claim.updated_at.isoformat() if claim.updated_at else None,
+    }
+
+
+def provider_for_user(user):
+    return Provider.query.filter_by(user_id=user.id).first()
 
 
 @app.after_request
@@ -122,6 +164,8 @@ def health():
         "status": "ok",
         "model_loaded": model_loaded,
         "saved_applications": Application.query.count(),
+        "claims": Claim.query.count(),
+        "policies": Policy.query.count(),
     })
 
 
@@ -144,6 +188,8 @@ def register():
     user = User(email=email, role="customer")
     user.set_password(password)
     db.session.add(user)
+    db.session.flush()
+    audit(user.id, "account_created", "user", user.id)
     db.session.commit()
     return jsonify({"message": "Account created", "user": user.to_dict()}), 201
 
@@ -197,7 +243,6 @@ def process():
     smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
     region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
     region = region_map.get(str(region_raw).lower(), 0)
-
     input_array = np.array([[age, sex, bmi, children, smoker, region]], dtype=float)
 
     if not model_loaded:
@@ -209,7 +254,6 @@ def process():
 
     rule_adjustments = []
     rule_adjustment = 0.0
-
     if smoker == 1:
         rule_adjustment += 0.20
         rule_adjustments.append({"rule": "smoker", "adjustment": 0.20, "reason": "Smoking status increases modeled risk."})
@@ -221,7 +265,6 @@ def process():
         rule_adjustments.append({"rule": "dependents", "adjustment": 0.05, "reason": "More than two dependents are present."})
 
     final_risk = min(1.0, risk_score + rule_adjustment)
-
     if final_risk < 0.5:
         decision = "Approved"
     elif final_risk <= 0.9:
@@ -230,7 +273,6 @@ def process():
         decision = "Manual Review"
 
     premium = 5000.0 * (1.0 + final_risk)
-
     shap_explanation = []
     if explainer is not None:
         shap_values = explainer(input_array)
@@ -290,8 +332,9 @@ def save():
     )
 
     db.session.add(application)
+    db.session.flush()
+    audit(user.id, "application_created", "application", application.id)
     db.session.commit()
-
     return jsonify({"message": "Application saved successfully", "application": application.to_dict()})
 
 
@@ -334,6 +377,204 @@ def get_application(application_id):
         return jsonify({"error": "Insufficient permissions"}), 403
 
     return jsonify(application.to_dict())
+
+
+@app.route("/claims", methods=["GET"])
+@roles_required("customer", "claims_officer", "admin", "provider")
+def get_claims():
+    user = current_user_record()
+    query = Claim.query
+
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None:
+            return jsonify([])
+        query = query.filter_by(customer_id=profile.id)
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        if provider is None:
+            return jsonify([])
+        query = query.filter_by(provider_id=provider.id)
+
+    return jsonify([claim_to_dict(c) for c in query.order_by(Claim.created_at.desc()).all()])
+
+
+@app.route("/claims", methods=["POST"])
+@roles_required("customer", "claims_officer", "admin", "provider")
+def create_claim():
+    data = request.get_json() or {}
+    user = current_user_record()
+
+    try:
+        policy_id = int(data["policy_id"])
+        claimed_amount = float(data.get("claimed_amount", 0))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "policy_id and a valid claimed_amount are required"}), 400
+
+    policy = db.session.get(Policy, policy_id)
+    if policy is None:
+        return jsonify({"error": "Policy not found"}), 404
+
+    customer_id = data.get("customer_id")
+    provider_id = data.get("provider_id")
+
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None or policy.customer_id != profile.id:
+            return jsonify({"error": "Policy does not belong to this customer"}), 403
+        customer_id = profile.id
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        if provider is None:
+            return jsonify({"error": "Provider profile not found"}), 403
+        provider_id = provider.id
+
+    if not customer_id:
+        customer_id = policy.customer_id
+
+    claim = Claim(
+        claim_number=f"RS-{os.urandom(5).hex().upper()}",
+        customer_id=int(customer_id),
+        policy_id=policy_id,
+        provider_id=int(provider_id) if provider_id else policy.provider_id,
+        claimed_amount=claimed_amount,
+        status="submitted",
+        description=str(data.get("description", "")),
+    )
+    db.session.add(claim)
+    db.session.flush()
+    audit(user.id, "claim_created", "claim", claim.id)
+    db.session.commit()
+    return jsonify({"message": "Claim submitted", "claim": claim_to_dict(claim)}), 201
+
+
+@app.route("/claims/<int:claim_id>", methods=["GET"])
+@roles_required("customer", "claims_officer", "admin", "provider")
+def get_claim(claim_id):
+    user = current_user_record()
+    claim = db.session.get(Claim, claim_id)
+    if claim is None:
+        return jsonify({"error": "Claim not found"}), 404
+
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None or claim.customer_id != profile.id:
+            return jsonify({"error": "Insufficient permissions"}), 403
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        if provider is None or claim.provider_id != provider.id:
+            return jsonify({"error": "Insufficient permissions"}), 403
+
+    return jsonify(claim_to_dict(claim))
+
+
+@app.route("/claims/<int:claim_id>", methods=["PUT"])
+@roles_required("claims_officer", "admin")
+def update_claim(claim_id):
+    user = current_user_record()
+    claim = db.session.get(Claim, claim_id)
+    if claim is None:
+        return jsonify({"error": "Claim not found"}), 404
+
+    data = request.get_json() or {}
+    if "status" in data:
+        claim.status = str(data["status"])
+    if "approved_amount" in data:
+        claim.approved_amount = float(data["approved_amount"])
+    if "assigned_officer_id" in data:
+        officer = db.session.get(User, int(data["assigned_officer_id"]))
+        if officer is None or officer.role != "claims_officer":
+            return jsonify({"error": "Invalid claims officer"}), 400
+        claim.assigned_officer_id = officer.id
+    audit(user.id, "claim_updated", "claim", claim.id, data)
+    db.session.commit()
+    return jsonify({"message": "Claim updated", "claim": claim_to_dict(claim)})
+
+
+@app.route("/providers/me", methods=["GET"])
+@roles_required("provider")
+def provider_me():
+    provider = provider_for_user(current_user_record())
+    if provider is None:
+        return jsonify({"error": "Provider profile not found"}), 404
+    return jsonify({
+        "id": provider.id,
+        "name": provider.name,
+        "provider_type": provider.provider_type,
+        "license_number": provider.license_number,
+        "status": provider.status,
+        "phone": provider.phone,
+        "address": provider.address,
+        "city": provider.city,
+        "state": provider.state,
+    })
+
+
+@app.route("/providers/me/claims", methods=["GET"])
+@roles_required("provider")
+def provider_claims():
+    provider = provider_for_user(current_user_record())
+    if provider is None:
+        return jsonify([])
+    claims = Claim.query.filter_by(provider_id=provider.id).order_by(Claim.created_at.desc()).all()
+    return jsonify([claim_to_dict(c) for c in claims])
+
+
+@app.route("/admin/users", methods=["GET"])
+@roles_required("admin")
+def admin_users():
+    users = User.query.order_by(User.created_at.desc()).all()
+    return jsonify([user.to_dict() for user in users])
+
+
+@app.route("/admin/users/<int:user_id>/role", methods=["PUT"])
+@roles_required("admin")
+def admin_update_role(user_id):
+    admin = current_user_record()
+    user = db.session.get(User, user_id)
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+
+    data = request.get_json() or {}
+    role = str(data.get("role", "")).strip().lower()
+    if role not in VALID_ROLES:
+        return jsonify({"error": "Invalid role"}), 400
+    if user.id == admin.id and role != "admin":
+        return jsonify({"error": "An admin cannot remove their own admin role"}), 400
+
+    user.role = role
+    audit(admin.id, "user_role_changed", "user", user.id, {"role": role})
+    db.session.commit()
+    return jsonify({"message": "Role updated", "user": user.to_dict()})
+
+
+@app.route("/admin/audit-logs", methods=["GET"])
+@roles_required("admin")
+def admin_audit_logs():
+    logs = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    return jsonify([{
+        "id": log.id,
+        "user_id": log.user_id,
+        "action": log.action,
+        "entity_type": log.entity_type,
+        "entity_id": log.entity_id,
+        "details": log.details,
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+    } for log in logs])
+
+
+@app.route("/admin/overview", methods=["GET"])
+@roles_required("admin")
+def admin_overview():
+    return jsonify({
+        "users": User.query.count(),
+        "customers": CustomerProfile.query.count(),
+        "providers": Provider.query.count(),
+        "policies": Policy.query.count(),
+        "applications": Application.query.count(),
+        "claims": Claim.query.count(),
+        "billing_transactions": BillingTransaction.query.count(),
+    })
 
 
 if __name__ == "__main__":
