@@ -1,0 +1,2 @@
+RiskSure Alembic migrations.
+Run `flask db upgrade` during deployment. Production must not use db.create_all().
