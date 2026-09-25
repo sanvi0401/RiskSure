@@ -20,21 +20,6 @@ export default function FinalPage() {
     setIsSaving(true)
 
     try {
-      const payload = {
-        name: applicationData.name,
-        age: applicationData.age,
-        sex: applicationData.sex,
-        bmi: applicationData.bmi,
-        children: applicationData.children,
-        smoker: applicationData.smoker,
-        region: applicationData.region,
-        risk_score: applicationData.riskScore,
-        rule_adjustment: applicationData.ruleAdjustment,
-        final_risk: applicationData.finalRisk,
-        decision: applicationData.decision,
-        premium: applicationData.premium,
-      }
-
       await apiJson(API_ENDPOINTS.save, {
         method: "POST",
         body: JSON.stringify({
@@ -60,6 +45,8 @@ export default function FinalPage() {
     } catch (error) {
       console.error("Application save failed:", error)
       setError(error instanceof Error ? error.message : "Unable to save application")
+    } finally {
+      setIsSaving(false)
     }
   }
 
