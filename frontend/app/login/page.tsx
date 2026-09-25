@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ArrowRight, Loader2, Shield, Sparkles, Waves } from "lucide-react"
+import { useAuth } from "@/context/auth-context"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -13,20 +14,25 @@ export default function LoginPage() {
   const [password, setPassword] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState("")
+  const { login } = useAuth()
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError("")
     setIsLoading(true)
 
-    // Simulate login delay
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-
-    // Simple validation
-    if (email && password) {
-      router.push("/dashboard")
-    } else {
+    if (!email || !password) {
       setError("Please enter both email and password")
+      setIsLoading(false)
+      return
+    }
+
+    try {
+      await login(email, password)
+      router.push("/dashboard")
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Unable to sign in")
+    } finally {
       setIsLoading(false)
     }
   }
@@ -145,7 +151,7 @@ export default function LoginPage() {
 
           <div className="mt-8 rounded-[1.6rem] border border-white/8 bg-white/4 p-4">
             <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Demo access</p>
-            <p className="mt-2 text-sm leading-6 text-foreground">Enter any email and password to open the full experience.</p>
+            <p className="mt-2 text-sm leading-6 text-foreground">Use an account created through the RiskSure authentication API.</p>
           </div>
         </section>
       </div>
