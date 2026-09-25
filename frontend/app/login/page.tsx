@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ArrowRight, Loader2, Shield, Sparkles, Waves } from "lucide-react"
-import { useAuth } from "@/context/auth-context"\nimport { QRCodeSVG } from "qrcode.react"
+import { useAuth } from "@/context/auth-context"\nimport { API_BASE_URL } from "@/lib/api"\nimport { QRCodeSVG } from "qrcode.react"
 
 export default function LoginPage() {
   const router = useRouter()
