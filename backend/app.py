@@ -1,3 +1,5 @@
+from functools import wraps
+
 from flask import Flask, jsonify, request
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
 import joblib
@@ -6,7 +8,7 @@ import os
 import json
 
 from database import db
-from models import Application, User
+from models import Application, User, CustomerProfile
 
 app = Flask(__name__)
 
@@ -22,6 +24,42 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
+
+
+VALID_ROLES = {"customer", "underwriter", "claims_officer", "provider", "admin"}
+STAFF_ROLES = {"underwriter", "claims_officer", "provider", "admin"}
+
+
+def current_user_record():
+    identity = get_jwt_identity()
+    try:
+        user_id = int(identity)
+    except (TypeError, ValueError):
+        return None
+    return db.session.get(User, user_id)
+
+
+def roles_required(*allowed_roles):
+    allowed = set(allowed_roles)
+
+    def decorator(view):
+        @wraps(view)
+        @jwt_required()
+        def wrapped(*args, **kwargs):
+            user = current_user_record()
+            if user is None:
+                return jsonify({"error": "User not found"}), 404
+            if user.role not in allowed:
+                return jsonify({"error": "Insufficient permissions"}), 403
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+def customer_for_user(user):
+    return CustomerProfile.query.filter_by(user_id=user.id).first()
 
 
 @app.after_request
@@ -117,7 +155,7 @@ def login():
     password = str(data.get("password", ""))
     user = User.query.filter_by(email=email).first()
 
-    if user is None or not user.check_password(password):
+    if user is None or user.role not in VALID_ROLES or not user.check_password(password):
         return jsonify({"error": "Invalid email or password"}), 401
 
     token = create_access_token(identity=str(user.id), additional_claims={"role": user.role})
@@ -127,32 +165,33 @@ def login():
 @app.route("/auth/me", methods=["GET"])
 @jwt_required()
 def current_user():
-    user = db.session.get(User, int(get_jwt_identity()))
+    user = current_user_record()
     if user is None:
         return jsonify({"error": "User not found"}), 404
     return jsonify({"user": user.to_dict()})
 
 
 @app.route("/auth/staff-only", methods=["GET"])
-@jwt_required()
+@roles_required(*STAFF_ROLES)
 def staff_only():
-    role = get_jwt().get("role")
-    if role not in {"underwriter", "claims_officer", "provider", "admin"}:
-        return jsonify({"error": "Staff access required"}), 403
-    return jsonify({"message": "Staff access granted", "role": role})
+    user = current_user_record()
+    return jsonify({"message": "Staff access granted", "role": user.role})
 
 
 @app.route("/process", methods=["POST"])
-@jwt_required()
+@roles_required("customer", "underwriter", "admin")
 def process():
     data = request.get_json() or {}
 
-    age = float(data.get("age", 0))
-    sex_raw = data.get("sex", "male")
-    bmi = float(data.get("bmi", 0.0))
-    children = float(data.get("children", 0))
-    smoker_raw = data.get("smoker", "no")
-    region_raw = data.get("region", "southwest")
+    try:
+        age = float(data.get("age", 0))
+        sex_raw = data.get("sex", "male")
+        bmi = float(data.get("bmi", 0.0))
+        children = float(data.get("children", 0))
+        smoker_raw = data.get("smoker", "no")
+        region_raw = data.get("region", "southwest")
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid underwriting input"}), 400
 
     sex = 1 if str(sex_raw).lower() == "male" else 0
     smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
@@ -213,18 +252,29 @@ def process():
         "decision": decision,
         "premium": round(premium, 2),
         "model_status": "xgboost",
-        "explanation": {
-            "method": "SHAP",
-            "features": shap_explanation,
-        },
+        "explanation": {"method": "SHAP", "features": shap_explanation},
     })
 
+
 @app.route("/save", methods=["POST"])
-@jwt_required()
+@roles_required("customer", "underwriter", "admin")
 def save():
-    data = request.get_json()
+    data = request.get_json() or {}
+    user = current_user_record()
+
+    customer_id = None
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None:
+            profile = CustomerProfile(user_id=user.id, full_name=str(data.get("name", "Unknown")))
+            db.session.add(profile)
+            db.session.flush()
+        customer_id = profile.id
+    elif data.get("customer_id"):
+        customer_id = int(data["customer_id"])
 
     application = Application(
+        customer_id=customer_id,
         name=data.get("name", "Unknown"),
         age=data.get("age"),
         sex=data.get("sex"),
@@ -242,25 +292,47 @@ def save():
     db.session.add(application)
     db.session.commit()
 
-    return jsonify({
-        "message": "Application saved successfully",
-        "application": application.to_dict(),
-    })
+    return jsonify({"message": "Application saved successfully", "application": application.to_dict()})
 
 
 @app.route("/applications", methods=["GET"])
 @jwt_required()
 def get_applications():
-    applications = Application.query.order_by(Application.created_at.desc()).all()
+    user = current_user_record()
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+
+    query = Application.query
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None:
+            return jsonify([])
+        query = query.filter_by(customer_id=profile.id)
+    elif user.role not in {"underwriter", "admin"}:
+        return jsonify({"error": "Insufficient permissions"}), 403
+
+    applications = query.order_by(Application.created_at.desc()).all()
     return jsonify([application.to_dict() for application in applications])
 
 
 @app.route("/applications/<int:application_id>", methods=["GET"])
 @jwt_required()
 def get_application(application_id):
+    user = current_user_record()
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+
     application = db.session.get(Application, application_id)
     if application is None:
         return jsonify({"error": "Application not found"}), 404
+
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None or application.customer_id != profile.id:
+            return jsonify({"error": "Insufficient permissions"}), 403
+    elif user.role not in {"underwriter", "admin"}:
+        return jsonify({"error": "Insufficient permissions"}), 403
+
     return jsonify(application.to_dict())
 
 
