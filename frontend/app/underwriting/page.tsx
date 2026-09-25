@@ -6,7 +6,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { useApplication } from "@/context/application-context"
-import { ArrowRight, ArrowLeft, CheckCircle, AlertTriangle, XCircle } from "lucide-react"
+import { ArrowRight, ArrowLeft, CheckCircle, AlertTriangle, XCircle, Sparkles } from "lucide-react"
 
 export default function UnderwritingPage() {
   const router = useRouter()
@@ -73,6 +73,31 @@ export default function UnderwritingPage() {
             </div>
           </div>
 
+          {applicationData.explanation.features.length > 0 && (
+            <div className="mb-8">
+              <div className="mb-4 flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-primary" />
+                <h3 className="text-lg font-semibold text-foreground">AI Explanation</h3>
+                <span className="text-xs text-muted-foreground">SHAP feature contributions</span>
+              </div>
+              <div className="rounded-[1.5rem] border border-white/8 bg-white/5 p-4">
+                <div className="mb-3 text-xs text-muted-foreground">
+                  Model: {applicationData.modelStatus || "XGBoost"} · Explanation: {applicationData.explanation.method || "SHAP"}
+                </div>
+                <div className="flex flex-col gap-3">
+                  {applicationData.explanation.features.slice(0, 5).map((item) => (
+                    <div key={item.feature} className="flex items-center justify-between gap-4">
+                      <span className="capitalize text-sm text-foreground">{item.feature}</span>
+                      <span className={`text-sm font-medium ${item.direction === "increases" ? "text-amber-300" : item.direction === "decreases" ? "text-primary" : "text-muted-foreground"}`}>
+                        {item.contribution > 0 ? "+" : ""}{item.contribution.toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           {applicationData.appliedRules.length > 0 && (
             <div className="mb-8">
               <h3 className="mb-4 text-lg font-semibold text-foreground">Applied Rules</h3>
@@ -90,7 +115,7 @@ export default function UnderwritingPage() {
             </div>
           )}
 
-          <div className="mb-8 flex flex-col items-center rounded-[1.8rem] border border-white/8 bg-white/5 p-8">
+          <div className="mb-8 rounded-[1.5rem] border border-primary/15 bg-primary/5 p-4 text-sm text-muted-foreground">AI-generated underwriting output is decision support. A qualified underwriter should make the final approval, conditions, or review decision.</div>\n\n          <div className="mb-8 flex flex-col items-center rounded-[1.8rem] border border-white/8 bg-white/5 p-8">
             {getDecisionIcon()}
             <h2 className="mt-4 text-2xl font-bold tracking-[-0.04em] text-foreground">Underwriting Decision</h2>
             <div className="mt-3">
