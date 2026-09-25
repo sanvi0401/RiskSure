@@ -3,7 +3,21 @@ import joblib
 import numpy as np
 import os
 
+from database import db
+from models import Application
+
 app = Flask(__name__)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///risksure.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db.init_app(app)
+
+with app.app_context():
+    db.create_all()
 
 
 @app.after_request
@@ -13,9 +27,6 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS"
     return response
 
-
-applications = []
-application_counter = 1
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 model_loaded = False
@@ -58,7 +69,7 @@ def health():
     return jsonify({
         "status": "ok",
         "model_loaded": model_loaded,
-        "saved_applications": len(applications),
+        "saved_applications": Application.query.count(),
     })
 
 
@@ -123,29 +134,44 @@ def process():
 
 @app.route("/save", methods=["POST"])
 def save():
-    global application_counter
-
     data = request.get_json()
 
-    application = {
-        "id": application_counter,
-        "name": data.get("name", "Unknown"),
-        "risk_score": float(data.get("risk_score", 0.0)),
-        "rule_adjustment": float(data.get("rule_adjustment", 0.0)),
-        "final_risk": float(data.get("final_risk", 0.0)),
-        "decision": str(data.get("decision", "Unknown")),
-        "premium": float(data.get("premium", 0.0)),
-    }
+    application = Application(
+        name=data.get("name", "Unknown"),
+        age=data.get("age"),
+        sex=data.get("sex"),
+        bmi=data.get("bmi"),
+        children=data.get("children"),
+        smoker=data.get("smoker"),
+        region=data.get("region"),
+        risk_score=float(data.get("risk_score", 0.0)),
+        rule_adjustment=float(data.get("rule_adjustment", 0.0)),
+        final_risk=float(data.get("final_risk", 0.0)),
+        decision=str(data.get("decision", "Unknown")),
+        premium=float(data.get("premium", 0.0)),
+    )
 
-    applications.append(application)
-    application_counter += 1
+    db.session.add(application)
+    db.session.commit()
 
-    return jsonify({"message": "Application saved successfully", "application": application})
+    return jsonify({
+        "message": "Application saved successfully",
+        "application": application.to_dict(),
+    })
 
 
 @app.route("/applications", methods=["GET"])
 def get_applications():
-    return jsonify(applications)
+    applications = Application.query.order_by(Application.created_at.desc()).all()
+    return jsonify([application.to_dict() for application in applications])
+
+
+@app.route("/applications/<int:application_id>", methods=["GET"])
+def get_application(application_id):
+    application = db.session.get(Application, application_id)
+    if application is None:
+        return jsonify({"error": "Application not found"}), 404
+    return jsonify(application.to_dict())
 
 
 if __name__ == "__main__":
