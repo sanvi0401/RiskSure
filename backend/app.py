@@ -1,4 +1,4 @@
-from functools import wraps
+from datetime import timedelta\nfrom functools import wraps
 
 from flask import Flask, jsonify, request
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
@@ -224,7 +224,7 @@ def login():
         setup_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
     if user.totp_enabled:
-        return jsonify({"requires_totp": True, "user_id": user.id, "user": user.to_dict()})
+        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})\n        return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
     return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
 
 
@@ -269,13 +269,13 @@ def verify_totp_setup():
 
 
 @app.route("/auth/login/verify-totp", methods=["POST"])
+@jwt_required()
 def verify_login_totp():
-    data = request.get_json() or {}
-    try:
-        user = db.session.get(User, int(data.get("user_id")))
-    except (TypeError, ValueError):
-        user = None
-    code = str(data.get("code", "")).replace(" ", "")
+    claims = get_jwt()
+    if claims.get("auth_stage") != "totp_challenge":
+        return jsonify({"error": "TOTP challenge required"}), 403
+    user = current_user_record()
+    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
     if user is None or not user.totp_enabled or not user.totp_secret:
         return jsonify({"error": "TOTP verification unavailable"}), 400
     if not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
@@ -284,13 +284,13 @@ def verify_login_totp():
 
 
 @app.route("/auth/login/recovery", methods=["POST"])
+@jwt_required()
 def login_recovery():
-    data = request.get_json() or {}
-    try:
-        user = db.session.get(User, int(data.get("user_id")))
-    except (TypeError, ValueError):
-        user = None
-    code = str(data.get("recovery_code", "")).strip().upper()
+    claims = get_jwt()
+    if claims.get("auth_stage") != "totp_challenge":
+        return jsonify({"error": "TOTP challenge required"}), 403
+    user = current_user_record()
+    code = str((request.get_json() or {}).get("recovery_code", "")).strip().upper()
     if user is None or not user.totp_enabled:
         return jsonify({"error": "Recovery unavailable"}), 400
     hashes = recovery_hashes(user)
