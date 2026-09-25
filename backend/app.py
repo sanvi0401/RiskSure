@@ -6,6 +6,8 @@ import joblib
 import numpy as np
 import os
 import json
+import pyotp
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from database import db
 from models import (
@@ -37,6 +39,20 @@ with app.app_context():
 
 VALID_ROLES = {"customer", "underwriter", "claims_officer", "provider", "admin"}
 STAFF_ROLES = {"underwriter", "claims_officer", "provider", "admin"}
+TOTP_REQUIRED_ROLES = STAFF_ROLES
+
+
+
+def generate_recovery_codes():
+    return [os.urandom(6).hex().upper() for _ in range(8)]
+
+
+def recovery_hashes(user):
+    return json.loads(user.recovery_codes_hash) if user.recovery_codes_hash else []
+
+
+def auth_token(user):
+    return create_access_token(identity=str(user.id), additional_claims={"role": user.role})
 
 
 def current_user_record():
@@ -204,8 +220,105 @@ def login():
     if user is None or user.role not in VALID_ROLES or not user.check_password(password):
         return jsonify({"error": "Invalid email or password"}), 401
 
-    token = create_access_token(identity=str(user.id), additional_claims={"role": user.role})
-    return jsonify({"access_token": token, "user": user.to_dict()})
+    if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
+        setup_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
+        return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
+    if user.totp_enabled:
+        return jsonify({"requires_totp": True, "user_id": user.id, "user": user.to_dict()})
+    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+
+
+
+@app.route("/auth/totp/setup", methods=["POST"])
+@jwt_required()
+def totp_setup():
+    claims = get_jwt()
+    if claims.get("auth_stage") != "totp_setup":
+        return jsonify({"error": "TOTP setup session required"}), 403
+    user = current_user_record()
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+    secret = pyotp.random_base32()
+    user.totp_pending_secret = secret
+    db.session.commit()
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="RiskSure")
+    return jsonify({"secret": secret, "otpauth_uri": uri})
+
+
+@app.route("/auth/totp/verify-setup", methods=["POST"])
+@jwt_required()
+def verify_totp_setup():
+    claims = get_jwt()
+    if claims.get("auth_stage") != "totp_setup":
+        return jsonify({"error": "TOTP setup session required"}), 403
+    user = current_user_record()
+    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
+    if user is None or not user.totp_pending_secret:
+        return jsonify({"error": "No pending TOTP setup"}), 400
+    if not pyotp.TOTP(user.totp_pending_secret).verify(code, valid_window=1):
+        return jsonify({"error": "Invalid authenticator code"}), 400
+    codes = generate_recovery_codes()
+    user.totp_secret = user.totp_pending_secret
+    user.totp_pending_secret = None
+    user.totp_enabled = True
+    user.recovery_codes_hash = json.dumps([generate_password_hash(x) for x in codes])
+    user.recovery_codes_used = json.dumps([])
+    audit(user.id, "totp_enabled", "user", user.id)
+    db.session.commit()
+    return jsonify({"access_token": auth_token(user), "user": user.to_dict(), "recovery_codes": codes})
+
+
+@app.route("/auth/login/verify-totp", methods=["POST"])
+def verify_login_totp():
+    data = request.get_json() or {}
+    try:
+        user = db.session.get(User, int(data.get("user_id")))
+    except (TypeError, ValueError):
+        user = None
+    code = str(data.get("code", "")).replace(" ", "")
+    if user is None or not user.totp_enabled or not user.totp_secret:
+        return jsonify({"error": "TOTP verification unavailable"}), 400
+    if not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
+        return jsonify({"error": "Invalid authenticator code"}), 401
+    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+
+
+@app.route("/auth/login/recovery", methods=["POST"])
+def login_recovery():
+    data = request.get_json() or {}
+    try:
+        user = db.session.get(User, int(data.get("user_id")))
+    except (TypeError, ValueError):
+        user = None
+    code = str(data.get("recovery_code", "")).strip().upper()
+    if user is None or not user.totp_enabled:
+        return jsonify({"error": "Recovery unavailable"}), 400
+    hashes = recovery_hashes(user)
+    for i, hashed in enumerate(hashes):
+        if check_password_hash(hashed, code):
+            hashes.pop(i)
+            user.recovery_codes_hash = json.dumps(hashes)
+            audit(user.id, "totp_recovery_used", "user", user.id)
+            db.session.commit()
+            return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+    return jsonify({"error": "Invalid or already used recovery code"}), 401
+
+
+@app.route("/auth/totp/disable", methods=["POST"])
+@jwt_required()
+def disable_totp():
+    user = current_user_record()
+    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
+    if user is None or not user.totp_enabled or not pyotp.TOTP(user.totp_secret).verify(code, valid_window=1):
+        return jsonify({"error": "Valid authenticator code required"}), 400
+    user.totp_enabled = False
+    user.totp_secret = None
+    user.totp_pending_secret = None
+    user.recovery_codes_hash = None
+    user.recovery_codes_used = None
+    audit(user.id, "totp_disabled", "user", user.id)
+    db.session.commit()
+    return jsonify({"message": "TOTP disabled"})
 
 
 @app.route("/auth/me", methods=["GET"])
