@@ -6,7 +6,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/ui/status-badge"
 import { useApplication } from "@/context/application-context"
-import { API_ENDPOINTS, apiFetch } from "@/lib/api"
+import { apiJson, API_ENDPOINTS } from "@/lib/api"
 import { ArrowLeft, Save, Loader2, CheckCircle } from "lucide-react"
 
 export default function FinalPage() {
@@ -14,6 +14,7 @@ export default function FinalPage() {
   const { applicationData, resetApplication } = useApplication()
   const [isSaving, setIsSaving] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
+  const [error, setError] = useState("")
 
   const handleSave = async () => {
     setIsSaving(true)
@@ -34,22 +35,28 @@ export default function FinalPage() {
         premium: applicationData.premium,
       }
 
-      const response = await apiFetch(API_ENDPOINTS.save, {
+      await apiJson(API_ENDPOINTS.save, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          name: applicationData.name,
+          age: applicationData.age,
+          sex: applicationData.sex,
+          bmi: applicationData.bmi,
+          children: applicationData.children,
+          smoker: applicationData.smoker,
+          region: applicationData.region,
+          risk_score: applicationData.riskScore,
+          rule_adjustment: applicationData.ruleAdjustment,
+          final_risk: applicationData.finalRisk,
+          decision: applicationData.decision,
+          premium: applicationData.premium,
+        }),
       })
-
-      if (response.ok) {
-        setIsSaved(true)
-        setTimeout(() => {
-          resetApplication()
-          router.push("/dashboard")
-        }, 1500)
-      } else {
-        const data = await response.json().catch(() => ({}))
-        throw new Error(data.error || "Unable to save application")
-      }
+      setIsSaved(true)
+      setTimeout(() => {
+        resetApplication()
+        router.push("/dashboard")
+      }, 1500)
     } catch (error) {
       console.error("Application save failed:", error)
       setError(error instanceof Error ? error.message : "Unable to save application")
