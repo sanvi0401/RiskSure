@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select"
 import { useApplication } from "@/context/application-context"
 import { apiJson, API_ENDPOINTS } from "@/lib/api"
-import { ArrowRight, Loader2, Activity, AlertCircle, Sparkles } from "lucide-react"
+import { ArrowRight, Loader2, Activity, AlertCircle } from "lucide-react"
 
 export default function RiskPage() {
   const router = useRouter()
@@ -53,7 +53,16 @@ export default function RiskPage() {
         region,
       }
 
-      const data = await apiJson(API_ENDPOINTS.process, {
+      const data = await apiJson<{
+        risk_score: number
+        rule_adjustment: number
+        final_risk: number
+        decision: string
+        premium: number
+        model_status: string
+        applied_rules?: { rule: string; adjustment: number }[]
+        explanation?: { method: string; features: { feature: string; contribution: number; direction: string }[] }
+      }>(API_ENDPOINTS.process, {
         method: "POST",
         body: JSON.stringify(payload),
       })
@@ -64,19 +73,19 @@ export default function RiskPage() {
         if (parseFloat(bmi) > 30) appliedRules.push({ rule: "BMI > 30", adjustment: 0.05 })
         if (parseInt(children) > 2) appliedRules.push({ rule: "Children > 2", adjustment: 0.05 })
         setRiskScore(data.risk_score)
-        setApplicationData({
-          bmi: parseFloat(bmi),
-          children: parseInt(children),
-          smoker,
-          region,
-          riskScore: data.risk_score,
-          ruleAdjustment: data.rule_adjustment,
-          finalRisk: data.final_risk,
-          decision: data.decision,
-          premium: data.premium,
-          appliedRules,
-          modelStatus: data.model_status,
-          explanation: data.explanation ?? { method: "", features: [] },
+      setApplicationData({
+        bmi: parseFloat(bmi),
+        children: parseInt(children),
+        smoker,
+        region,
+        riskScore: data.risk_score,
+        ruleAdjustment: data.rule_adjustment,
+        finalRisk: data.final_risk,
+        decision: data.decision,
+        premium: data.premium,
+        appliedRules: data.applied_rules ?? appliedRules,
+        modelStatus: data.model_status,
+        explanation: data.explanation ?? { method: "", features: [] },
         })
       }
     } catch (error) {
@@ -103,7 +112,9 @@ export default function RiskPage() {
               </div>
             )}
 
-            {errors.api && <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{errors.api}</div>}\n\n            <form onSubmit={calculateRisk} className="flex flex-col gap-5">
+            {errors.api && <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{errors.api}</div>}
+
+            <form onSubmit={calculateRisk} className="flex flex-col gap-5">
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="bmi" className="text-sm font-medium text-foreground">
