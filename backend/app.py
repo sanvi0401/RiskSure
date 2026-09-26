@@ -77,7 +77,7 @@ migrate = Migrate(app, db)
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["300 per minute"])
 
 with app.app_context():
-    if os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true":
+    if os.getenv("AUTO_CREATE_TABLES", "true").lower() == "true":
         db.create_all()
 
 
