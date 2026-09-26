@@ -46,7 +46,11 @@ if DATABASE_URL.startswith("postgres://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-JWT_SECRET = os.getenv("JWT_SECRET_KEY") or os.getenv("TOTP_ENCRYPTION_KEY") or "risksure-vercel-jwt-bootstrap-change-in-production"
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "").strip()
+if os.getenv("FLASK_ENV", "").lower() == "production" and not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET_KEY must be configured in production")
+if not JWT_SECRET:
+    JWT_SECRET = "local-development-only-change-me"
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
 jwt = JWTManager(app)
 db.init_app(app)
