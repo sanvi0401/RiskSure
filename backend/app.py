@@ -9,6 +9,7 @@ from functools import wraps
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
+from flask_migrate import Migrate
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
@@ -64,8 +65,11 @@ if os.getenv("FLASK_ENV", "").lower() == "production" and not JWT_SECRET:
 if not JWT_SECRET:
     JWT_SECRET = "local-development-only-change-me"
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_HOURS", "2")))
+app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=int(os.getenv("JWT_REFRESH_TOKEN_EXPIRES_DAYS", "30")))
 jwt = JWTManager(app)
 db.init_app(app)
+migrate = Migrate(app, db)
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["300 per minute"])
 
 with app.app_context():
@@ -228,6 +232,15 @@ def health():
         "service": "RiskSure backend",
         "model_loaded": model_loaded,
     })
+
+
+@app.route("/auth/refresh", methods=["POST"])
+@jwt_required(refresh=True)
+def refresh_access_token():
+    user = current_user_record()
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"access_token": create_access_token(identity=str(user.id), additional_claims={"role": user.role})})
 
 
 @app.route("/auth/register", methods=["POST"])
