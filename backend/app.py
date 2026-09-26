@@ -428,7 +428,7 @@ def verify_login_totp():
         return jsonify({"error": "TOTP verification unavailable"}), 400
     if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid authenticator code"}), 401
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+    return jsonify({"access_token": auth_token(user), "refresh_token": create_refresh_token(identity=str(user.id), additional_claims={"role": user.role}), "user": user.to_dict()})
 
 
 @app.route("/auth/login/recovery", methods=["POST"])
