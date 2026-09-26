@@ -12,7 +12,7 @@ from flask_limiter import Limiter
 from flask_migrate import Migrate
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
-from flask_jwt_extended import JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
 import json
 import pyotp
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -338,7 +338,7 @@ def login():
     if user.totp_enabled:
         challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
         return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+    return jsonify({"access_token": auth_token(user), "refresh_token": create_refresh_token(identity=str(user.id), additional_claims={"role": user.role}), "user": user.to_dict()})
 
 
 
