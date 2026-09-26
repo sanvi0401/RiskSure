@@ -58,11 +58,21 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
       const refresh = localStorage.getItem("risksure_refresh_token")
       if (refresh) {
         try {
-          const retry = await fetch(
-            `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
-            { ...init, headers: new Headers({ ...Object.fromEntries(headers.entries()), Authorization: "Bearer " + refresh }), cache: "no-store" },
-          )
-          if (retry.ok) return retry
+          const refreshResponse = await fetch(`${API_BASE_URL}/auth/refresh`, {
+            method: "POST",
+            headers: { Authorization: "Bearer " + refresh },
+            cache: "no-store",
+          })
+          const refreshData = await refreshResponse.json().catch(() => null)
+          if (refreshResponse.ok && refreshData?.access_token) {
+            localStorage.setItem("risksure_access_token", refreshData.access_token)
+            const retryHeaders = new Headers(init.headers)
+            if (init.body && !retryHeaders.has("Content-Type")) retryHeaders.set("Content-Type", "application/json")
+            retryHeaders.set("Authorization", "Bearer " + refreshData.access_token)
+            return fetch(`${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`, {
+              ...init, headers: retryHeaders, cache: "no-store",
+            })
+          }
         } catch {
           // Fall through to normal session cleanup.
         }
