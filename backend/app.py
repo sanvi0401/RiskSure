@@ -18,6 +18,11 @@ import pyotp
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import text as sql_text
 
+try:
+    from xgboost import XGBRegressor
+except ImportError:
+    XGBRegressor = None
+
 from database import db
 from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_upsert_claim, retrieve_policy_chunks
 from models import (
@@ -217,10 +222,33 @@ feature_names = ["age", "sex", "bmi", "children", "smoker", "region"]
 min_charge = 1000.0
 max_charge = 50000.0
 
-print("ML model packages are kept outside the Vercel runtime to keep the function within size limits.")
-model_loaded = False
-model = None
-explainer = None
+def load_xgboost_model():
+    global model_loaded, model, min_charge, max_charge
+    if XGBRegressor is None:
+        raise RuntimeError("xgboost is not installed")
+    model_path = os.path.join(MODEL_DIR, "insurance_xgb_model.json")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"XGBoost model artifact not found: {model_path}")
+    loaded = XGBRegressor()
+    loaded.load_model(model_path)
+    model = loaded
+
+    bounds_path = os.path.join(MODEL_DIR, "risk_bounds.pkl")
+    if os.path.exists(bounds_path):
+        import joblib
+        bounds = joblib.load(bounds_path)
+        min_charge = float(bounds.get("min_charge", min_charge))
+        max_charge = float(bounds.get("max_charge", max_charge))
+    model_loaded = True
+
+
+try:
+    load_xgboost_model()
+    print("XGBoost underwriting model loaded successfully.")
+except Exception as model_error:
+    model_loaded = False
+    model = None
+    print(f"XGBoost model unavailable; using deterministic fallback: {model_error}")
 
 
 @app.route("/")
