@@ -3,6 +3,23 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react"
 import { apiFetch } from "@/lib/api"
 
+async function refreshAccessToken(): Promise<string | null> {
+  const refresh = typeof window !== "undefined" ? localStorage.getItem("risksure_refresh_token") : null
+  if (!refresh) return null
+  try {
+    const response = await apiFetch("/auth/refresh", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + refresh },
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.access_token) return null
+    localStorage.setItem("risksure_access_token", data.access_token)
+    return data.access_token
+  } catch {
+    return null
+  }
+}
+
 export type UserRole = "customer" | "underwriter" | "claims_officer" | "provider" | "admin"
 export interface AuthUser { id:number; email:string; role:UserRole; created_at?:string|null }
 interface AuthContextType {
