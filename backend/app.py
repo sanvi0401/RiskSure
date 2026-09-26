@@ -41,7 +41,11 @@ CORS(
     supports_credentials=False,
 )
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "sqlite:///risksure.db"
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
+if not DATABASE_URL:
+    if os.getenv("FLASK_ENV", "").lower() == "production":
+        raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured in production")
+    DATABASE_URL = "sqlite:///risksure.db"
 
 # Vercel's Python runtime uses a PostgreSQL adapter explicitly configured here.
 # Force SQLAlchemy onto psycopg 3 instead of implicitly resolving psycopg2.
