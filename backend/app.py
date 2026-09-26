@@ -15,6 +15,7 @@ import os
 import json
 import pyotp
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import text as sql_text
 
 from database import db
 from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_upsert_claim, retrieve_policy_chunks
@@ -878,6 +879,15 @@ def policy_document(policy_id):
 def policy_intelligence(policy_id):
     p=db.session.get(Policy,policy_id)
     if not p:return jsonify({"error":"Policy not found"}),404
+    u=current_user_record()
+    if u.role=="customer":
+        profile=customer_for_user(u)
+        if profile is None or p.customer_id != profile.id:
+            return jsonify({"error":"Insufficient permissions"}),403
+    elif u.role=="provider":
+        provider=provider_for_user(u)
+        if provider is None or p.provider_id != provider.id:
+            return jsonify({"error":"Insufficient permissions"}),403
     d=request.get_json() or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
@@ -1004,7 +1014,7 @@ def case_review(application_id):
 
 @app.route("/health/detailed",methods=["GET"])
 def detailed_health():
-    return jsonify({"status":"ok","database":db.session.execute(db.text("SELECT 1")).scalar()==1,"model_loaded":model is not None,"environment":os.getenv("FLASK_ENV","development")})
+    return jsonify({"status":"ok","database":db.session.execute(sql_text("SELECT 1")).scalar()==1,"model_loaded":model is not None,"environment":os.getenv("FLASK_ENV","development")})
 
 @app.route("/integrations/status",methods=["GET"])
 @roles_required("admin")
