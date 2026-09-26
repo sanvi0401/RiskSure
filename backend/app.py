@@ -231,6 +231,8 @@ def load_xgboost_model():
         raise FileNotFoundError(f"XGBoost model artifact not found: {model_path}")
     loaded = XGBRegressor()
     loaded.load_model(model_path)
+    if not hasattr(loaded, "predict"):
+        raise RuntimeError("Loaded XGBoost artifact is invalid")
     model = loaded
 
     bounds_path = os.path.join(MODEL_DIR, "risk_bounds.pkl")
