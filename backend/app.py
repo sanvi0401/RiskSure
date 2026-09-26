@@ -32,13 +32,17 @@ from models import (
 )
 
 app = Flask(__name__)
-_frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip()
-_allowed_origins = ["https://risk-sure-od3i.vercel.app"]
-if _frontend_origin and _frontend_origin not in _allowed_origins:
-    _allowed_origins.append(_frontend_origin)
+_frontend_origins = [
+    origin.strip()
+    for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_ORIGIN", "")).split(",")
+    if origin.strip()
+]
+_allowed_origins = ["https://risk-sure-od3i.vercel.app", *_frontend_origins]
+if os.getenv("FLASK_ENV", "").lower() != "production":
+    _allowed_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])
 CORS(
     app,
-    resources={r"/*": {"origins": _allowed_origins}},
+    resources={r"/*": {"origins": list(dict.fromkeys(_allowed_origins))}},
     supports_credentials=False,
 )
 
