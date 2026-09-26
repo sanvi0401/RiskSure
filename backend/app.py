@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import timedelta
@@ -209,556 +210,32 @@ def health():
 
 @app.route("/auth/register", methods=["POST"])
 def register():
-    data = request.get_json() or {}
-    email = str(data.get("email", "")).strip().lower()
-    password = str(data.get("password", ""))
-    requested_role = str(data.get("role", "customer")).strip().lower()
-
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
-    if len(password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters"}), 400
-    if requested_role != "customer":
-        return jsonify({"error": "Public registration can only create customer accounts"}), 403
-    if User.query.filter_by(email=email).first():
-        return jsonify({"error": "An account with this email already exists"}), 409
-
-    user = User(email=email, role="customer")
-    user.set_password(password)
-    db.session.add(user)
-    db.session.flush()
-    audit(user.id, "account_created", "user", user.id)
-    db.session.commit()
-    return jsonify({"message": "Account created", "user": user.to_dict()}), 201
-
-
-@app.route("/auth/password/reset-with-totp", methods=["POST"])
-@limiter.limit("5 per minute")
-def reset_password_with_totp():
-    data = request.get_json() or {}
-    email = str(data.get("email", "")).strip().lower()
-    code = str(data.get("code", "")).replace(" ", "")
-    new_password = str(data.get("new_password", ""))
-
-    if not email or len(code) != 6 or len(new_password) < 8:
-        return jsonify({"error": "Email, 6-digit authenticator code and a password of at least 8 characters are required"}), 400
-
-    user = User.query.filter_by(email=email).first()
-    if user is None or not user.totp_enabled or not user.totp_secret:
-        return jsonify({"error": "Google Authenticator is not enabled for this account"}), 400
-
-    if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
-        return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
-
-    user.set_password(new_password)
-    audit(user.id, "password_reset_with_totp", "user", user.id)
-    db.session.commit()
-    return jsonify({"message": "Password reset successfully"})
-
-
-
-@app.route("/auth/password/reset-with-recovery", methods=["POST"])
-@limiter.limit("5 per minute")
-def reset_password_with_recovery():
-    data = request.get_json() or {}
-    email = str(data.get("email", "")).strip().lower()
-    recovery_code = str(data.get("recovery_code", "")).strip().upper()
-    new_password = str(data.get("new_password", ""))
-
-    if not email or not recovery_code or len(new_password) < 8:
-        return jsonify({"error": "Email, recovery code and a password of at least 8 characters are required"}), 400
-
-    user = User.query.filter_by(email=email).first()
-    if user is None:
-        return jsonify({"error": "Invalid recovery details"}), 401
-
-    hashes = recovery_hashes(user)
-    for i, hashed in enumerate(hashes):
-        if check_password_hash(hashed, recovery_code):
-            hashes.pop(i)
-            user.recovery_codes_hash = json.dumps(hashes)
-            user.set_password(new_password)
-            audit(user.id, "password_reset_with_recovery", "user", user.id)
-            db.session.commit()
-            return jsonify({"message": "Password reset successfully. You can now sign in."})
-
-    return jsonify({"error": "Invalid or already used recovery code"}), 401
-
-
-@app.route("/auth/login", methods=["POST"])
-@limiter.limit("10 per minute")
-def login():
-    data = request.get_json() or {}
-    email = str(data.get("email", "")).strip().lower()
-    password = str(data.get("password", ""))
-    user = User.query.filter_by(email=email).first()
-
-    if user is None or user.role not in VALID_ROLES or not user.check_password(password):
-        return jsonify({"error": "Invalid email or password"}), 401
-
-    if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
-        setup_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
-        return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
-    if user.totp_enabled:
-        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
-        return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
-
-
-
-@app.route("/auth/totp/setup", methods=["POST"])
-@jwt_required()
-def totp_setup():
-    claims = get_jwt()
-    if claims.get("auth_stage") != "totp_setup":
-        return jsonify({"error": "TOTP setup session required"}), 403
-    user = current_user_record()
-    if user is None:
-        return jsonify({"error": "User not found"}), 404
-    secret = pyotp.random_base32()
-    user.totp_pending_secret = _encrypt_secret(secret)
-    db.session.commit()
-    uri = pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="RiskSure")
-    return jsonify({"secret": secret, "otpauth_uri": uri})
-
-
-@app.route("/auth/totp/verify-setup", methods=["POST"])
-@jwt_required()
-def verify_totp_setup():
-    claims = get_jwt()
-    if claims.get("auth_stage") != "totp_setup":
-        return jsonify({"error": "TOTP setup session required"}), 403
-    user = current_user_record()
-    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
-    if user is None or not user.totp_pending_secret:
-        return jsonify({"error": "No pending TOTP setup"}), 400
-    if not pyotp.TOTP(_decrypt_secret(user.totp_pending_secret)).verify(code, valid_window=1):
-        return jsonify({"error": "Invalid authenticator code"}), 400
-    codes = generate_recovery_codes()
-    user.totp_secret = user.totp_pending_secret
-    user.totp_pending_secret = None
-    user.totp_enabled = True
-    user.recovery_codes_hash = json.dumps([generate_password_hash(x) for x in codes])
-    user.recovery_codes_used = json.dumps([])
-    audit(user.id, "totp_enabled", "user", user.id)
-    db.session.commit()
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict(), "recovery_codes": codes})
-
-
-@app.route("/auth/login/verify-totp", methods=["POST"])
-@limiter.limit("10 per minute")
-@jwt_required()
-def verify_login_totp():
-    claims = get_jwt()
-    if claims.get("auth_stage") != "totp_challenge":
-        return jsonify({"error": "TOTP challenge required"}), 403
-    user = current_user_record()
-    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
-    if user is None or not user.totp_enabled or not user.totp_secret:
-        return jsonify({"error": "TOTP verification unavailable"}), 400
-    if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
-        return jsonify({"error": "Invalid authenticator code"}), 401
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
-
-
-@app.route("/auth/login/recovery", methods=["POST"])
-@limiter.limit("5 per minute")
-@jwt_required()
-def login_recovery():
-    claims = get_jwt()
-    if claims.get("auth_stage") != "totp_challenge":
-        return jsonify({"error": "TOTP challenge required"}), 403
-    user = current_user_record()
-    code = str((request.get_json() or {}).get("recovery_code", "")).strip().upper()
-    if user is None or not user.totp_enabled:
-        return jsonify({"error": "Recovery unavailable"}), 400
-    hashes = recovery_hashes(user)
-    for i, hashed in enumerate(hashes):
-        if check_password_hash(hashed, code):
-            hashes.pop(i)
-            user.recovery_codes_hash = json.dumps(hashes)
-            audit(user.id, "totp_recovery_used", "user", user.id)
-            db.session.commit()
-            return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
-    return jsonify({"error": "Invalid or already used recovery code"}), 401
-
-
-@app.route("/auth/totp/disable", methods=["POST"])
-@jwt_required()
-def disable_totp():
-    user = current_user_record()
-    code = str((request.get_json() or {}).get("code", "")).replace(" ", "")
-    if user is None or not user.totp_enabled or not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
-        return jsonify({"error": "Valid authenticator code required"}), 400
-    user.totp_enabled = False
-    user.totp_secret = None
-    user.totp_pending_secret = None
-    user.recovery_codes_hash = None
-    user.recovery_codes_used = None
-    audit(user.id, "totp_disabled", "user", user.id)
-    db.session.commit()
-    return jsonify({"message": "TOTP disabled"})
-
-
-@app.route("/auth/me", methods=["GET"])
-@jwt_required()
-def current_user():
-    user = current_user_record()
-    if user is None:
-        return jsonify({"error": "User not found"}), 404
-    return jsonify({"user": user.to_dict()})
-
-
-@app.route("/auth/staff-only", methods=["GET"])
-@roles_required(*STAFF_ROLES)
-def staff_only():
-    user = current_user_record()
-    return jsonify({"message": "Staff access granted", "role": user.role})
-
-
-@app.route("/process", methods=["POST"])
-@roles_required("customer", "underwriter", "admin")
-def process():
-    data = request.get_json() or {}
-
-    try:
-        age = float(data.get("age", 0))
-        sex_raw = data.get("sex", "male")
-        bmi = float(data.get("bmi", 0.0))
-        children = float(data.get("children", 0))
-        smoker_raw = data.get("smoker", "no")
-        region_raw = data.get("region", "southwest")
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid underwriting input"}), 400
-
-    sex = 1 if str(sex_raw).lower() == "male" else 0
-    smoker = 1 if str(smoker_raw).lower() in ["yes", "true", "1"] else 0
-    region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
-    region = region_map.get(str(region_raw).lower(), 0)
-    if age <= 0 or age > 120 or bmi <= 0 or bmi > 100 or children < 0 or children > 30:
-        return jsonify({"error": "Underwriting values are outside supported ranges"}), 400
-
-    if model_loaded and model is not None:
-        prediction = float(model.predict([[age, sex, bmi, children, smoker, region]])[0])
-        model_status = "xgboost"
-    else:
-        prediction = 3500.0 + age * 35.0 + bmi * 80.0 + children * 250.0 + smoker * 6500.0 + region * 250.0
-        model_status = "deterministic_fallback"
-    risk_score = (prediction - min_charge) / max(max_charge - min_charge, 1.0)
-    risk_score = max(0.0, min(1.0, float(risk_score)))
-
-    rule_adjustments = []
-    rule_adjustment = 0.0
-    if smoker == 1:
-        rule_adjustment += 0.20
-        rule_adjustments.append({"rule": "smoker", "adjustment": 0.20, "reason": "Smoking status increases modeled risk."})
-    if bmi > 30:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "high_bmi", "adjustment": 0.05, "reason": "BMI is above 30."})
-    if children > 2:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "dependents", "adjustment": 0.05, "reason": "More than two dependents are present."})
-
-    final_risk = min(1.0, risk_score + rule_adjustment)
-    if final_risk < 0.5:
-        decision = "Approved"
-    elif final_risk <= 0.9:
-        decision = "Approved with Conditions"
-    else:
-        decision = "Manual Review"
-
-    premium = 5000.0 * (1.0 + final_risk)
-    shap_explanation = []
-    if explainer is not None and model is not None:
-        shap_values = explainer([[age, sex, bmi, children, smoker, region]])
-        contributions = list(shap_values.values[0])
-        for name, contribution in zip(feature_names, contributions):
-            shap_explanation.append({
-                "feature": name,
-                "contribution": round(float(contribution), 4),
-                "direction": "increases" if contribution > 0 else "decreases" if contribution < 0 else "neutral",
-            })
-        shap_explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
-
-    return jsonify({
-        "predicted_charge": prediction,
-        "risk_score": round(risk_score, 4),
-        "rule_adjustment": round(rule_adjustment, 4),
-        "applied_rules": rule_adjustments,
-        "final_risk": round(final_risk, 4),
-        "decision": decision,
-        "premium": round(premium, 2),
-        "model_status": model_status,
-        "explanation": {"method": "SHAP", "features": shap_explanation},
-    })
-
-
-@app.route("/save", methods=["POST"])
-@roles_required("customer", "underwriter", "admin")
-def save():
-    data = request.get_json() or {}
-    user = current_user_record()
-
-    required = ("name", "age", "sex", "bmi", "children", "smoker", "region", "risk_score", "final_risk", "decision", "premium")
-    if any(data.get(key) in (None, "") for key in required):
-        return jsonify({"error": "Complete application data is required"}), 400
-    try:
-        age = int(data["age"])
-        bmi = float(data["bmi"])
-        children = int(data["children"])
-        risk_score = float(data["risk_score"])
-        final_risk = float(data["final_risk"])
-        premium = float(data["premium"])
-    except (TypeError, ValueError):
-        return jsonify({"error": "Application numeric fields are invalid"}), 400
-    if age <= 0 or age > 120 or bmi <= 0 or bmi > 100 or children < 0 or risk_score < 0 or risk_score > 1 or final_risk < 0 or final_risk > 1 or premium < 0:
-        return jsonify({"error": "Application values are outside supported ranges"}), 400
-
-    customer_id = None
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            profile = CustomerProfile(user_id=user.id, full_name=str(data.get("name", "Unknown")))
-            db.session.add(profile)
-            db.session.flush()
-        customer_id = profile.id
-    elif data.get("customer_id"):
-        customer_id = int(data["customer_id"])
-
-    application = Application(
-        customer_id=customer_id,
-        name=data.get("name", "Unknown"),
-        age=age,
-        sex=data.get("sex"),
-        bmi=bmi,
-        children=children,
-        smoker=data.get("smoker"),
-        region=data.get("region"),
-        risk_score=risk_score,
-        rule_adjustment=float(data.get("rule_adjustment", 0.0)),
-        final_risk=final_risk,
-        decision=str(data.get("decision", "Unknown")),
-        premium=premium,
-    )
-
-    db.session.add(application)
-    db.session.flush()
-    audit(user.id, "application_created", "application", application.id)
-    db.session.commit()
-    return jsonify({"message": "Application saved successfully", "application": application.to_dict()})
-
-
-@app.route("/applications", methods=["GET"])
-@jwt_required()
-def get_applications():
-    user = current_user_record()
-    if user is None:
-        return jsonify({"error": "User not found"}), 404
-
-    query = Application.query
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            return jsonify([])
-        query = query.filter_by(customer_id=profile.id)
-    elif user.role in {"claims_officer", "provider"}:
-        return jsonify([])
-    elif user.role not in {"underwriter", "admin"}:
-        return jsonify({"error": "Insufficient permissions"}), 403
-
-    applications = query.order_by(Application.created_at.desc()).all()
-    return jsonify([application.to_dict() for application in applications])
-
-
-@app.route("/underwriting/queue", methods=["GET"])
-@roles_required("underwriter", "admin")
-def underwriting_queue():
-    applications = Application.query.order_by(Application.created_at.desc()).all()
-    return jsonify([{
-        "id": a.id, "name": a.name, "age": a.age, "bmi": a.bmi, "smoker": a.smoker,
-        "final_risk": a.final_risk, "decision": a.decision, "premium": a.premium,
-        "review_status": a.review_status, "assigned_underwriter_id": a.assigned_underwriter_id,
-        "decision_reason": a.decision_reason,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
-    } for a in applications])
-
-
-@app.route("/underwriting/applications/<int:application_id>/assign", methods=["PUT"])
-@roles_required("underwriter", "admin")
-def assign_underwriting(application_id):
-    user = current_user_record()
-    application = db.session.get(Application, application_id)
-    if application is None:
-        return jsonify({"error": "Application not found"}), 404
-    data = request.get_json() or {}
-    assignee_id = int(data.get("underwriter_id", user.id))
-    assignee = db.session.get(User, assignee_id)
-    if assignee is None or assignee.role not in {"underwriter", "admin"}:
-        return jsonify({"error": "Invalid underwriter"}), 400
-    application.assigned_underwriter_id = assignee.id
-    application.review_status = "in_review"
-    audit(user.id, "underwriting_assigned", "application", application.id, {"underwriter_id": assignee.id})
-    db.session.commit()
-    return jsonify({"message": "Application assigned", "application_id": application.id, "underwriter_id": assignee.id})
-
-
-@app.route("/underwriting/applications/<int:application_id>/decision", methods=["PUT"])
-@roles_required("underwriter", "admin")
-def underwriting_decision(application_id):
-    user = current_user_record()
-    application = db.session.get(Application, application_id)
-    if application is None:
-        return jsonify({"error": "Application not found"}), 404
-    if application.assigned_underwriter_id not in {None, user.id} and user.role != "admin":
-        return jsonify({"error": "Application is assigned to another underwriter"}), 403
-    data = request.get_json() or {}
-    decision = str(data.get("decision", "")).strip()
-    if decision not in {"Approved", "Approved with Conditions", "Manual Review", "Rejected"}:
-        return jsonify({"error": "Invalid underwriting decision"}), 400
-    reason = str(data.get("reason", "")).strip()
-    if not reason:
-        return jsonify({"error": "A decision reason is required"}), 400
-    application.decision = decision
-    application.decision_reason = reason
-    application.review_status = "completed" if decision != "Manual Review" else "manual_review"
-    application.reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
-    application.assigned_underwriter_id = user.id if application.assigned_underwriter_id is None else application.assigned_underwriter_id
-    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason})
-    db.session.commit()
-    return jsonify({"message": "Underwriting decision recorded", "application": {
-        "id": application.id, "decision": application.decision, "decision_reason": application.decision_reason,
-        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None
-    }})
-
-
-@app.route("/applications/<int:application_id>", methods=["GET"])
-@jwt_required()
-def get_application(application_id):
-    user = current_user_record()
-    if user is None:
-        return jsonify({"error": "User not found"}), 404
-
-    application = db.session.get(Application, application_id)
-    if application is None:
-        return jsonify({"error": "Application not found"}), 404
-
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None or application.customer_id != profile.id:
-            return jsonify({"error": "Insufficient permissions"}), 403
-    elif user.role not in {"underwriter", "admin"}:
-        return jsonify({"error": "Insufficient permissions"}), 403
-
-    return jsonify(application.to_dict())
-
-
-@app.route("/claims", methods=["GET"])
-@roles_required("customer", "claims_officer", "admin", "provider")
-def get_claims():
-    user = current_user_record()
-    query = Claim.query
-
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            return jsonify([])
-        query = query.filter_by(customer_id=profile.id)
-    elif user.role == "provider":
-        provider = provider_for_user(user)
-        if provider is None:
-            return jsonify([])
-        query = query.filter_by(provider_id=provider.id)
-
-    return jsonify([claim_to_dict(c) for c in query.order_by(Claim.created_at.desc()).all()])
-
-
-@app.route("/claims", methods=["POST"])
-@roles_required("customer", "claims_officer", "admin", "provider")
-def create_claim():
-    data = request.get_json() or {}
-    user = current_user_record()
-
-    try:
-        policy_id = int(data["policy_id"])
-        claimed_amount = float(data.get("claimed_amount", 0))
-    except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "policy_id and a valid claimed_amount are required"}), 400
-
-    policy = db.session.get(Policy, policy_id)
-    if policy is None:
-        return jsonify({"error": "Policy not found"}), 404
-
-    customer_id = data.get("customer_id")
-    provider_id = data.get("provider_id")
-
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None or policy.customer_id != profile.id:
-            return jsonify({"error": "Policy does not belong to this customer"}), 403
-        customer_id = profile.id
-    elif user.role == "provider":
-        provider = provider_for_user(user)
-        if provider is None:
-            return jsonify({"error": "Provider profile not found"}), 403
-        provider_id = provider.id
-
-    if not customer_id:
-        customer_id = policy.customer_id
-
-    claim = Claim(
-        claim_number=f"RS-{os.urandom(5).hex().upper()}",
-        customer_id=int(customer_id),
-        policy_id=policy_id,
-        provider_id=int(provider_id) if provider_id else policy.provider_id,
-        claimed_amount=claimed_amount,
-        status="submitted",
-        description=str(data.get("description", "")),
-    )
-    db.session.add(claim)
-    db.session.flush()
-    audit(user.id, "claim_created", "claim", claim.id)
-    db.session.commit()
-    return jsonify({"message": "Claim submitted", "claim": claim_to_dict(claim)}), 201
-
-
-@app.route("/claims/<int:claim_id>", methods=["GET"])
-@roles_required("customer", "claims_officer", "admin", "provider")
-def get_claim(claim_id):
-    user = current_user_record()
-    claim = db.session.get(Claim, claim_id)
-    if claim is None:
-        return jsonify({"error": "Claim not found"}), 404
-
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None or claim.customer_id != profile.id:
-            return jsonify({"error": "Insufficient permissions"}), 403
-    elif user.role == "provider":
-        provider = provider_for_user(user)
-        if provider is None or claim.provider_id != provider.id:
-            return jsonify({"error": "Insufficient permissions"}), 403
-
-    return jsonify(claim_to_dict(claim))
-
-
-@app.route("/claims/<int:claim_id>", methods=["PUT"])
-@roles_required("claims_officer", "admin")
-def update_claim(claim_id):
-    user = current_user_record()
-    claim = db.session.get(Claim, claim_id)
-    if claim is None:
-        return jsonify({"error": "Claim not found"}), 404
-
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     if "status" in data:
-        claim.status = str(data["status"])
+        status = str(data["status"]).strip().lower()
+        if status not in {"submitted", "under_review", "approved", "rejected", "settled"}:
+            return jsonify({"error": "Invalid claim status"}), 400
+        claim.status = status
     if "approved_amount" in data:
-        claim.approved_amount = float(data["approved_amount"])
+        try:
+            approved_amount = float(data["approved_amount"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Approved amount must be numeric"}), 400
+        if not math.isfinite(approved_amount) or approved_amount < 0:
+            return jsonify({"error": "Approved amount must be a finite non-negative number"}), 400
+        if approved_amount > claim.claimed_amount:
+            return jsonify({"error": "Approved amount cannot exceed the claimed amount"}), 400
+        claim.approved_amount = approved_amount
     if "assigned_officer_id" in data:
-        officer = db.session.get(User, int(data["assigned_officer_id"]))
+        try:
+            officer_id = int(data["assigned_officer_id"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid claims officer"}), 400
+        officer = db.session.get(User, officer_id)
         if officer is None or officer.role != "claims_officer":
             return jsonify({"error": "Invalid claims officer"}), 400
         claim.assigned_officer_id = officer.id
+
     audit(user.id, "claim_updated", "claim", claim.id, data)
     db.session.commit()
     return jsonify({"message": "Claim updated", "claim": claim_to_dict(claim)})
@@ -808,7 +285,7 @@ def admin_update_role(user_id):
     if user is None:
         return jsonify({"error": "User not found"}), 404
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     role = str(data.get("role", "")).strip().lower()
     if role not in VALID_ROLES:
         return jsonify({"error": "Invalid role"}), 400
@@ -869,7 +346,7 @@ def list_policies():
 def policy_document(policy_id):
     p=db.session.get(Policy,policy_id)
     if not p:return jsonify({"error":"Policy not found"}),404
-    text=str((request.get_json() or {}).get("document_text","")).strip()
+    text=str((request.get_json(silent=True) or {}).get("document_text","")).strip()
     if not text:return jsonify({"error":"document_text is required"}),400
     p.terms_document=text;audit(current_user_record().id,"policy_document_indexed","policy",p.id,{"characters":len(text)});db.session.commit()
     return jsonify({"message":"Policy document indexed","policy":policy_to_dict(p)})
@@ -888,7 +365,7 @@ def policy_intelligence(policy_id):
         provider=provider_for_user(u)
         if provider is None or p.provider_id != provider.id:
             return jsonify({"error":"Insufficient permissions"}),403
-    d=request.get_json() or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
+    d=request.get_json(silent=True) or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
     try:
@@ -937,16 +414,55 @@ def billing_list():
 @app.route("/billing",methods=["POST"])
 @roles_required("customer","admin")
 def billing_create():
-    u=current_user_record();d=request.get_json() or {}
+    u=current_user_record();d=request.get_json(silent=True) or {}
     try:
         amount = float(d["amount"])
     except (KeyError, TypeError, ValueError):
         return jsonify({"error":"Valid amount is required"}),400
-    if amount <= 0:
-        return jsonify({"error":"Amount must be greater than zero"}),400
-    p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id",0)))
+    if not math.isfinite(amount) or amount <= 0:
+        return jsonify({"error":"Amount must be a finite number greater than zero"}),400
+
+    transaction_type = str(d.get("transaction_type","premium")).strip().lower()
+    if transaction_type not in {"premium", "claim_payment", "refund", "adjustment"}:
+        return jsonify({"error":"Invalid transaction type"}),400
+    status = str(d.get("status","pending")).strip().lower()
+    if status not in {"pending", "paid", "failed", "refunded"}:
+        return jsonify({"error":"Invalid transaction status"}),400
+
+    try:
+        policy_id = int(d["policy_id"]) if d.get("policy_id") is not None else None
+        claim_id = int(d["claim_id"]) if d.get("claim_id") is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error":"Invalid policy or claim identifier"}),400
+
+    if u.role=="customer":
+        p=customer_for_user(u)
+    else:
+        try:
+            customer_id = int(d.get("customer_id",0))
+        except (TypeError, ValueError):
+            return jsonify({"error":"Invalid customer identifier"}),400
+        p=db.session.get(CustomerProfile, customer_id)
+
     if not p:return jsonify({"error":"Customer profile not found"}),404
-    t=BillingTransaction(customer_id=p.id,policy_id=d.get("policy_id"),claim_id=d.get("claim_id"),transaction_type=str(d.get("transaction_type","premium")),amount=amount,status=str(d.get("status","pending")),reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
+
+    policy = db.session.get(Policy, policy_id) if policy_id is not None else None
+    if policy_id is not None and policy is None:
+        return jsonify({"error":"Policy not found"}),404
+    if policy is not None and policy.customer_id != p.id:
+        return jsonify({"error":"Policy does not belong to this customer"}),403
+
+    claim = db.session.get(Claim, claim_id) if claim_id is not None else None
+    if claim_id is not None and claim is None:
+        return jsonify({"error":"Claim not found"}),404
+    if claim is not None:
+        if claim.customer_id != p.id:
+            return jsonify({"error":"Claim does not belong to this customer"}),403
+        if policy is not None and claim.policy_id != policy.id:
+            return jsonify({"error":"Claim does not belong to the selected policy"}),400
+
+    t=BillingTransaction(customer_id=p.id,policy_id=policy_id,claim_id=claim_id,transaction_type=transaction_type,amount=amount,status=status,reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
+
     db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id);db.session.commit();return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference}),201
 
 @app.route("/customer/portal",methods=["GET"])
@@ -987,7 +503,7 @@ def claim_graph(claim_id):
 def claim_intelligence(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
-    d=request.get_json() or {};text=str(d.get("document_text","")).strip()
+    d=request.get_json(silent=True) or {};text=str(d.get("document_text","")).strip()
     extracted={"claim_number":c.claim_number,"claimed_amount":c.claimed_amount,"document_present":bool(text)}
     signals=[]
     if text and c.claimed_amount and str(c.claimed_amount) not in text:signals.append("Claimed amount was not found verbatim in supplied document.")
@@ -999,7 +515,7 @@ def claim_intelligence(claim_id):
 def claim_image_intelligence(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
-    d=request.get_json() or {}
+    d=request.get_json(silent=True) or {}
     path=str(d.get("image_path","")).strip()
     if not path:return jsonify({"error":"image_path is required"}),400
     return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(path)})
