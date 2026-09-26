@@ -35,8 +35,8 @@ Legacy duplicate folders also exist inside `risksure2 - Copy - Copy/`. They are 
 - The frontend implements a multi-step workflow: login, new application, risk, underwriting, premium, final review, and dashboard.
 - The backend exposes `GET /`, `GET /health`, `POST /process`, `POST /save`, and `GET /applications`.
 - The machine learning model files are already present in `backend/model/`.
-- If you install backend dependencies with Python 3.12, run `py -3 retrain_model.py` once so those model files match the installed library versions.
-- Saved applications are stored in memory, not in a database. Restarting the backend clears them.
+- The production API loads `backend/model/insurance_xgb_model.json`. If you retrain the model, use the isolated training dependencies in `backend/requirements-training.txt` and regenerate the JSON artifact before deploying.
+- Saved applications are persisted through SQLAlchemy in the configured database. Production requires `DATABASE_URL` or `NEON_DATABASE_URL`.
 - Frontend API calls are centralized in `frontend/lib/api.ts`, which reads `NEXT_PUBLIC_API_BASE_URL`.
 
 For a more detailed breakdown, see [PROJECT_ANALYSIS.md](./PROJECT_ANALYSIS.md).
@@ -70,7 +70,7 @@ py -3 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
-py -3 retrain_model.py
+python retrain_model.py
 py -3 app.py
 ```
 
@@ -124,13 +124,13 @@ py -3 retrain_model.py
 
 This regenerates:
 
-- `backend/model/insurance_model.pkl`
-- `backend/model/insurance_scaler.pkl`
+- `backend/model/insurance_xgb_model.json`
 - `backend/model/risk_bounds.pkl`
+- `backend/model/feature_metadata.json`
 
 ## Troubleshooting
 
 - If `py` does not work, try `python` instead of `py -3`.
 - If `pip install -r requirements.txt` fails on Python 3.12, first run `python -m pip install --upgrade pip setuptools wheel`.
 - If the frontend cannot reach the backend, check `frontend/.env.local` and confirm `NEXT_PUBLIC_API_BASE_URL=http://localhost:5000`.
-- If you see no saved applications after a restart, that is expected because storage is in memory only.
+- If database-backed routes fail, verify `DATABASE_URL`/`NEON_DATABASE_URL`, the PostgreSQL driver, and that the database tables have been initialized or migrations applied.
