@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useState, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, ReactNode } from "react"
 
 export interface ApplicationData {
   name: string
@@ -49,8 +49,31 @@ const defaultApplicationData: ApplicationData = {
 
 const ApplicationContext = createContext<ApplicationContextType | undefined>(undefined)
 
+const STORAGE_KEY = "risksure_application_draft"
+
 export function ApplicationProvider({ children }: { children: ReactNode }) {
   const [applicationData, setApplicationDataState] = useState<ApplicationData>(defaultApplicationData)
+  const [hydrated, setHydrated] = useState(false)
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY)
+      if (raw) setApplicationDataState({ ...defaultApplicationData, ...JSON.parse(raw) })
+    } catch {
+      sessionStorage.removeItem(STORAGE_KEY)
+    } finally {
+      setHydrated(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hydrated) return
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(applicationData))
+    } catch {
+      // Storage can be unavailable in privacy-restricted browser contexts.
+    }
+  }, [applicationData, hydrated])
 
   const setApplicationData = (data: Partial<ApplicationData>) => {
     setApplicationDataState((prev) => ({ ...prev, ...data }))
@@ -58,6 +81,7 @@ export function ApplicationProvider({ children }: { children: ReactNode }) {
 
   const resetApplication = () => {
     setApplicationDataState(defaultApplicationData)
+    try { sessionStorage.removeItem(STORAGE_KEY) } catch {} 
   }
 
   return (

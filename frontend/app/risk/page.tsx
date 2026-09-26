@@ -30,9 +30,9 @@ export default function RiskPage() {
 
   const validate = () => {
     const newErrors: Record<string, string> = {}
-    if (!applicationData.name || applicationData.age <= 0 || !applicationData.sex) newErrors.api = "Complete the applicant profile before calculating risk."
-    if (!bmi || parseFloat(bmi) <= 0) newErrors.bmi = "Valid BMI is required"
-    if (children === "" || parseInt(children) < 0) newErrors.children = "Valid number is required"
+    if (!applicationData.name || !Number.isInteger(applicationData.age) || applicationData.age <= 0 || applicationData.age > 120 || !applicationData.sex) newErrors.api = "Complete the applicant profile before calculating risk."
+    if (!bmi || !Number.isFinite(parseFloat(bmi)) || parseFloat(bmi) <= 0 || parseFloat(bmi) > 100) newErrors.bmi = "BMI must be between 0 and 100"
+    if (children === "" || !Number.isInteger(Number(children)) || parseInt(children) < 0 || parseInt(children) > 30) newErrors.children = "Children must be a whole number between 0 and 30"
     if (!smoker) newErrors.smoker = "Smoker status is required"
     if (!region) newErrors.region = "Region is required"
     setErrors(newErrors)

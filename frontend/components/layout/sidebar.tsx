@@ -12,7 +12,7 @@ import {
 const navItems: { href: string; label: string; icon: typeof LayoutDashboard; roles: UserRole[] }[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["customer","underwriter","claims_officer","provider","admin"] },
   { href: "/new-application", label: "New Application", icon: FilePlus, roles: ["customer","underwriter","admin"] },
-  { href: "/risk", label: "Risk Scoring", icon: Activity, roles: ["underwriter","admin"] },
+  { href: "/risk", label: "Risk Scoring", icon: Activity, roles: ["customer","underwriter","admin"] },
   { href: "/underwriting", label: "Underwriting", icon: Scale, roles: ["underwriter","admin"] },
   { href: "/claims", label: "Claims Centre", icon: ClipboardList, roles: ["claims_officer","admin"] },
   { href: "/provider", label: "Provider Portal", icon: Network, roles: ["provider","admin"] },

@@ -21,7 +21,7 @@ def run_migrations_offline():
         context.run_migrations()
 
 def run_migrations_online():
-    connectable = current_app.extensions["migrate"].db.engine
+    connectable = db.engine
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
         with context.begin_transaction():

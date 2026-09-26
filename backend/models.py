@@ -117,6 +117,30 @@ class Application(db.Model):
     assigned_underwriter = db.relationship("User", foreign_keys=[assigned_underwriter_id])
 
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "customer_id": self.customer_id,
+            "name": self.name,
+            "age": self.age,
+            "sex": self.sex,
+            "bmi": self.bmi,
+            "children": self.children,
+            "smoker": self.smoker,
+            "region": self.region,
+            "risk_score": self.risk_score,
+            "rule_adjustment": self.rule_adjustment,
+            "final_risk": self.final_risk,
+            "decision": self.decision,
+            "premium": self.premium,
+            "review_status": self.review_status,
+            "decision_reason": self.decision_reason,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "assigned_underwriter_id": self.assigned_underwriter_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Claim(db.Model):
     __tablename__ = "claims"
 

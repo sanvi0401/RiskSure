@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE_URL = "https://risk-sure.vercel.app"
+const DEFAULT_API_BASE_URL = ""
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || DEFAULT_API_BASE_URL
@@ -44,17 +44,56 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers.set("Authorization", `Bearer ${token}`)
   }
 
-  const response = await fetch(
-    `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
-    { ...init, headers, cache: "no-store" },
-  )
+  const controller = new AbortController()
+  const timeoutMs = 30_000
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
-  if (response.status === 401 && typeof window !== "undefined") {
-    localStorage.removeItem("risksure_access_token")
-    localStorage.removeItem("risksure_user")
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
+      { ...init, headers, cache: "no-store", signal: init.signal ?? controller.signal },
+    )
+
+    if (response.status === 401 && typeof window !== "undefined" && !path.includes("/auth/refresh")) {
+      const refresh = localStorage.getItem("risksure_refresh_token")
+      if (refresh) {
+        try {
+          const refreshResponse = await fetch(`${API_BASE_URL}/auth/refresh`, {
+            method: "POST",
+            headers: { Authorization: "Bearer " + refresh },
+            cache: "no-store",
+          })
+          const refreshData = await refreshResponse.json().catch(() => null)
+          if (refreshResponse.ok && refreshData?.access_token) {
+            localStorage.setItem("risksure_access_token", refreshData.access_token)
+            const retryHeaders = new Headers(init.headers)
+            if (init.body && !retryHeaders.has("Content-Type")) retryHeaders.set("Content-Type", "application/json")
+            retryHeaders.set("Authorization", "Bearer " + refreshData.access_token)
+            return fetch(`${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`, {
+              ...init, headers: retryHeaders, cache: "no-store",
+            })
+          }
+        } catch {
+          // Fall through to normal session cleanup.
+        }
+      }
+      localStorage.removeItem("risksure_access_token")
+      localStorage.removeItem("risksure_refresh_token")
+      localStorage.removeItem("risksure_user")
+    }
+
+    return response
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("The request timed out. Please try again.")
+    }
+    if (error instanceof TypeError) {
+      throw new Error("Unable to reach the RiskSure backend. Check your connection and try again.")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
   }
-
-  return response
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -66,6 +105,9 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
         ? String((data as { error: unknown }).error)
         : `Request failed with status ${response.status}`
     throw new Error(message)
+  }
+  if (data === null) {
+    throw new Error("The backend returned an empty or invalid response.")
   }
   return data as T
 }
