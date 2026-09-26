@@ -54,8 +54,21 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
       { ...init, headers, cache: "no-store", signal: init.signal ?? controller.signal },
     )
 
-    if (response.status === 401 && typeof window !== "undefined") {
+    if (response.status === 401 && typeof window !== "undefined" && !path.includes("/auth/refresh")) {
+      const refresh = localStorage.getItem("risksure_refresh_token")
+      if (refresh) {
+        try {
+          const retry = await fetch(
+            `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
+            { ...init, headers: new Headers({ ...Object.fromEntries(headers.entries()), Authorization: "Bearer " + refresh }), cache: "no-store" },
+          )
+          if (retry.ok) return retry
+        } catch {
+          // Fall through to normal session cleanup.
+        }
+      }
       localStorage.removeItem("risksure_access_token")
+      localStorage.removeItem("risksure_refresh_token")
       localStorage.removeItem("risksure_user")
     }
 
