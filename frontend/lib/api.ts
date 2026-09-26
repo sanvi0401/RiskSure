@@ -1,4 +1,6 @@
-const DEFAULT_API_BASE_URL = ""
+// Same-domain Vercel deployments expose the Flask adapter under /api.
+// Set NEXT_PUBLIC_API_BASE_URL for a separately deployed backend.
+const DEFAULT_API_BASE_URL = "/api"
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || DEFAULT_API_BASE_URL
