@@ -44,17 +44,33 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers.set("Authorization", `Bearer ${token}`)
   }
 
-  const response = await fetch(
-    `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
-    { ...init, headers, cache: "no-store" },
-  )
+  const controller = new AbortController()
+  const timeoutMs = 30_000
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
-  if (response.status === 401 && typeof window !== "undefined") {
-    localStorage.removeItem("risksure_access_token")
-    localStorage.removeItem("risksure_user")
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
+      { ...init, headers, cache: "no-store", signal: init.signal ?? controller.signal },
+    )
+
+    if (response.status === 401 && typeof window !== "undefined") {
+      localStorage.removeItem("risksure_access_token")
+      localStorage.removeItem("risksure_user")
+    }
+
+    return response
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("The request timed out. Please try again.")
+    }
+    if (error instanceof TypeError) {
+      throw new Error("Unable to reach the RiskSure backend. Check your connection and try again.")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
   }
-
-  return response
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -66,6 +82,9 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
         ? String((data as { error: unknown }).error)
         : `Request failed with status ${response.status}`
     throw new Error(message)
+  }
+  if (data === null) {
+    throw new Error("The backend returned an empty or invalid response.")
   }
   return data as T
 }
