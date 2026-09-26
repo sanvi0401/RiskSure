@@ -6,7 +6,7 @@ import { Shield, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { API_BASE_URL } from "@/lib/api"
+import { apiFetch } from "@/lib/api"
 
 export default function RegisterPage(){
   const router=useRouter()
@@ -20,7 +20,7 @@ export default function RegisterPage(){
     if(password!==confirm){setError("Passwords do not match");return}
     setBusy(true)
     try{
-      const r=await fetch(API_BASE_URL+"/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password,role:"customer"})})
+      const r=await apiFetch("/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password,role:"customer"})})
       const d=await r.json()
       if(!r.ok)throw new Error(d.error||"Registration failed")
       router.push("/login?registered=1")
