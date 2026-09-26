@@ -12,3 +12,6 @@ Flask-Limiter==3.12
 cryptography==50.0.1
 Flask-Migrate==4.1.0
 alembic==1.16.5
+
+xgboost==3.0.5
+joblib==1.5.2
