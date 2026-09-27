@@ -10,7 +10,7 @@ cryptography==50.0.1
 requests==2.34.2
 neo4j==6.3.1
 python-dotenv==1.1.1
-gunicorn==23.0.0
+gunicorn==26.2.0
 psycopg[binary]==3.2.10
 
 # Underwriting model runtime. On Linux (Vercel, Docker) use the CPU-only wheel:

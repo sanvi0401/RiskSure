@@ -16,7 +16,7 @@ dependencies = [
   'requests==2.34.2',
   'neo4j==6.3.1',
   'python-dotenv==1.1.1',
-  'gunicorn==23.0.0',
+  'gunicorn==26.2.0',
   'psycopg[binary]==3.2.10',
   'xgboost-cpu==3.0.5; sys_platform == "linux"',
   'xgboost==3.0.5; sys_platform != "linux"',
