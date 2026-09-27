@@ -13,6 +13,12 @@ def _configured(*names: str) -> bool:
     return all(bool(os.getenv(name, "").strip()) for name in names)
 
 
+def _neo4j_session(driver):
+    # Aura and multi-database servers may name the database explicitly.
+    database = os.getenv("NEO4J_DATABASE", "").strip()
+    return driver.session(database=database) if database else driver.session()
+
+
 def neo4j_driver():
     if not _configured("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"):
         return None
@@ -42,7 +48,7 @@ def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
     )
     """
     try:
-        with driver.session() as session:
+        with _neo4j_session(driver) as session:
             session.run(query, **claim).consume()
         return True
     except Exception:
@@ -67,7 +73,7 @@ def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
     seen_nodes: set[str] = set()
     seen_edges: set[tuple[str, str, str]] = set()
     try:
-        with driver.session() as session:
+        with _neo4j_session(driver) as session:
             for row in session.run(query, claim_id=claim_id):
                 for node, kind in (
                     (row["c"], "claim"),

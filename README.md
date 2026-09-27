@@ -2,135 +2,129 @@
 
 RiskSure is a two-part insurance risk assessment project:
 
-- `frontend/` is a Next.js app for the user flow.
-- `backend/` is a Flask API that loads the ML model and returns underwriting results.
+- `frontend/`: Next.js 15 app (login with Google Authenticator, application flow, dashboards).
+- `backend/`: Flask API with an XGBoost underwriting model, PostgreSQL via SQLAlchemy, and JWT auth.
 
-## Canonical project structure
-
-Use the top-level folders below as the real project:
+In production the browser only talks to the frontend. The frontend proxies
+`/api/*` to the backend (see `frontend/next.config.mjs`), so there is no CORS
+setup to get wrong.
 
 ```text
-backend/
-  app.py
-  retrain_model.py
-  requirements.txt
-  model/
-frontend/
-  app/
-  components/
-  context/
-  hooks/
-  lib/
-  public/
-  .env.example
-  package.json
-PROJECT_ANALYSIS.md
-README.md
+browser ──► frontend (Vercel)  ──/api/* rewrite──►  backend (Vercel / Docker)  ──►  PostgreSQL (Neon)
 ```
 
-Legacy duplicate folders also exist inside `risksure2 - Copy - Copy/`. They are older copied files and are not needed to run the app.
+## Environment files
 
-## High-level analysis
+| File | Used for | Template |
+| --- | --- | --- |
+| `backend/.env` | Local backend run (gitignored) | `backend/.env.example` |
+| `frontend/.env.local` | Local frontend run (gitignored) | `frontend/.env.example` |
 
-- The frontend implements a multi-step workflow: login, new application, risk, underwriting, premium, final review, and dashboard.
-- The backend exposes `GET /`, `GET /health`, `POST /process`, `POST /save`, and `GET /applications`.
-- The machine learning model files are already present in `backend/model/`.
-- The production API loads `backend/model/insurance_xgb_model.json`. If you retrain the model, use the isolated training dependencies in `backend/requirements-training.txt` and regenerate the JSON artifact before deploying.
-- Saved applications are persisted through SQLAlchemy in the configured database. Production requires `DATABASE_URL` or `NEON_DATABASE_URL`.
-- Frontend API calls are centralized in `frontend/lib/api.ts`, which reads `NEXT_PUBLIC_API_BASE_URL`.
+In production, put the same variables in your host's dashboard instead of files.
 
-For a more detailed breakdown, see [PROJECT_ANALYSIS.md](./PROJECT_ANALYSIS.md).
+## Run locally
 
-## Requirements
+Requirements: Python 3.12, Node.js 18+.
 
-- Python 3.10+
-- Node.js 18+
-- npm
-
-Recommended:
-
-- Python 3.11 is the safest option for this project.
-- Python 3.12 works with the version-aware dependency pins in `backend/requirements.txt`.
-
-## Step-by-step run guide
-
-### 1. Open the root folder
-
-```powershell
-cd "c:\Users\pc\Downloads\risksure2 - Copy - Copy"
-```
-
-### 2. Start the backend
-
-Open terminal 1:
-
-```powershell
+```bash
 cd backend
-py -3 -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip setuptools wheel
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python retrain_model.py
-py -3 app.py
+python app.py            # http://localhost:5001  (5000 is taken by macOS AirPlay)
 ```
 
-Expected backend URL:
+On macOS, `brew install libomp` enables the XGBoost model. Without it the API
+still runs and uses a deterministic fallback formula; `/health` shows `model_loaded`.
 
-```text
-http://localhost:5000
-```
-
-Health check:
-
-```text
-http://localhost:5000/health
-```
-
-### 3. Start the frontend
-
-Open terminal 2:
-
-```powershell
-cd "c:\Users\pc\Downloads\risksure2 - Copy - Copy\frontend"
-Copy-Item .env.example .env.local -Force
+```bash
+cd frontend
 npm install
-npm run dev
+npm run dev              # http://localhost:3000
 ```
 
-Expected frontend URL:
+`frontend/.env.local` already points `BACKEND_API_URL` at `http://localhost:5001`.
 
-```text
-http://localhost:3000
+### First admin account
+
+Public sign-up only creates customers. Create an admin (then promote other staff from the Admin page):
+
+```bash
+cd backend && source .venv/bin/activate
+flask --app app create-admin --email you@example.com
 ```
 
-### 4. Use the application
+Against production, run the same command locally with `DATABASE_URL` in `backend/.env` set to the production database.
 
-1. Open `http://localhost:3000`.
-2. Go through login.
-3. Create a new application.
-4. Fill in risk details and calculate the score.
-5. Continue through underwriting and premium review.
-6. Save the application.
-7. Open the dashboard to view saved records.
+## Deploy to production (Vercel)
 
-## Optional: retrain the model
+Create two Vercel projects from this repository.
 
-From `backend/`:
+### 1. Backend project
 
-```powershell
-.venv\Scripts\activate
-py -3 retrain_model.py
+- Root Directory: `backend`. It uses `backend/vercel.json`.
+- Environment variables (Production):
+  - `FLASK_ENV=production`
+  - `DATABASE_URL`: your Neon/Postgres connection string
+  - `JWT_SECRET_KEY` and `TOTP_ENCRYPTION_KEY`: use the values generated in `backend/.env`
+  - `AUTO_CREATE_TABLES=true`
+- Deploy, then open `https://<backend>.vercel.app/health/detailed`. It should show `"database": true` and `"model_loaded": true`.
+
+### 2. Frontend project
+
+- Root Directory: `frontend`, Framework: Next.js.
+- Environment variables:
+  - `NEXT_PUBLIC_API_BASE_URL=/api`
+  - `BACKEND_API_URL=https://<backend>.vercel.app` (no trailing slash)
+- Deploy. `BACKEND_API_URL` is read at build time, so **redeploy the frontend after changing it**.
+- Check `https://<frontend>.vercel.app/api/health`. It should return the backend's JSON.
+
+### Alternative: Docker (Render, Railway, Fly.io, a VPS)
+
+```bash
+cd backend
+docker build -t risksure-backend .
+docker run -p 8000:8000 --env-file .env -e FLASK_ENV=production risksure-backend
 ```
 
-This regenerates:
+Then set the frontend's `BACKEND_API_URL` to that service's URL.
 
-- `backend/model/insurance_xgb_model.json`
-- `backend/model/risk_bounds.pkl`
-- `backend/model/feature_metadata.json`
+## Database schema
+
+With `AUTO_CREATE_TABLES=true` (default) the backend creates missing tables and
+widens legacy columns on startup. That is idempotent and suits Vercel, which has
+no release step. To manage the schema with migrations instead, set it to `false` and run:
+
+```bash
+flask --app app db upgrade        # fresh database
+flask --app app db stamp 0001_initial && flask --app app db upgrade   # database created earlier by create_all
+```
+
+## Tests
+
+```bash
+cd backend && pip install pytest && python -m pytest tests
+cd frontend && npm run typecheck && npm run build
+```
+
+## Retraining the model
+
+```bash
+cd backend
+pip install -r requirements-training.txt
+python retrain_model.py
+```
+
+This regenerates `model/insurance_xgb_model.json`, `model/risk_bounds.pkl` and
+`model/feature_metadata.json`. `tests/test_smoke.py` checks that predictions stay plausible.
 
 ## Troubleshooting
 
-- If `py` does not work, try `python` instead of `py -3`.
-- If `pip install -r requirements.txt` fails on Python 3.12, first run `python -m pip install --upgrade pip setuptools wheel`.
-- If the frontend cannot reach the backend, check `frontend/.env.local` and confirm `NEXT_PUBLIC_API_BASE_URL=http://localhost:5000`.
-- If database-backed routes fail, verify `DATABASE_URL`/`NEON_DATABASE_URL`, the PostgreSQL driver, and that the database tables have been initialized or migrations applied.
+| Symptom | Cause / fix |
+| --- | --- |
+| Frontend shows "Endpoint not found" or 404 on every action | `BACKEND_API_URL` not set on the frontend project, or set after the last build. Set it and redeploy. |
+| `/api/health` works but login fails with 500 | Check backend logs. Usually `DATABASE_URL` is unreachable; `/health/detailed` shows `database: false`. |
+| Authenticator codes rejected after a redeploy | `TOTP_ENCRYPTION_KEY` changed. It must stay constant once users enrol. |
+| Everyone logged out after a redeploy | `JWT_SECRET_KEY` changed. |
+| Local frontend gets 403 from `localhost:5000` | That port is macOS AirPlay. The backend runs on 5001. |
+| Backend function too large on Vercel | Use the Docker deployment instead. |

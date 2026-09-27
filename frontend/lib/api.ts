@@ -42,7 +42,8 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json")
   }
-  if (token) {
+  // Respect an explicit Authorization header (TOTP challenge/setup and refresh tokens).
+  if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`)
   }
 
@@ -56,7 +57,8 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
       { ...init, headers, cache: "no-store", signal: init.signal ?? controller.signal },
     )
 
-    if (response.status === 401 && typeof window !== "undefined" && !path.includes("/auth/refresh")) {
+    const usedStoredToken = !new Headers(init.headers).has("Authorization")
+    if (response.status === 401 && usedStoredToken && typeof window !== "undefined" && !path.includes("/auth/")) {
       const refresh = localStorage.getItem("risksure_refresh_token")
       if (refresh) {
         try {

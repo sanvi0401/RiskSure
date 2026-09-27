@@ -3,9 +3,20 @@ import os
 import math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Load backend/.env for local runs. Hosted platforms inject real environment
+# variables, which always take precedence over the file.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=False)
+except ImportError:
+    pass
+
+import base64
+import hashlib
 from datetime import timedelta
 from functools import wraps
 
+import click
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -15,13 +26,19 @@ from cryptography.fernet import Fernet, InvalidToken
 from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
 import json
 import pyotp
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import text as sql_text
 
+# xgboost raises XGBoostError (not ImportError) when its native library cannot
+# load, e.g. libomp missing on macOS. Never let that take the whole API down.
 try:
-    from xgboost import XGBRegressor
-except ImportError:
-    XGBRegressor = None
+    import numpy as np
+    import xgboost as xgb
+except Exception as xgb_import_error:  # noqa: BLE001
+    np = None
+    xgb = None
+    print(f"xgboost unavailable: {xgb_import_error}")
 
 from database import db
 from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_upsert_claim, retrieve_policy_chunks
@@ -36,14 +53,19 @@ from models import (
     User,
 )
 
+IS_PRODUCTION = os.getenv("FLASK_ENV", "").strip().lower() == "production"
+
 app = Flask(__name__)
+# Vercel/Render/Railway sit behind a proxy; trust its X-Forwarded-* headers so
+# rate limiting keys on the real client IP instead of the proxy.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 _frontend_origins = [
     origin.strip()
     for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_ORIGIN", "")).split(",")
     if origin.strip()
 ]
 _allowed_origins = ["https://risk-sure-od3i.vercel.app", *_frontend_origins]
-if os.getenv("FLASK_ENV", "").lower() != "production":
+if not IS_PRODUCTION:
     _allowed_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])
 CORS(
     app,
@@ -51,9 +73,9 @@ CORS(
     supports_credentials=False,
 )
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
+DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "").strip()
 if not DATABASE_URL:
-    if os.getenv("FLASK_ENV", "").lower() == "production":
+    if IS_PRODUCTION:
         raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured in production")
     DATABASE_URL = "sqlite:///risksure.db"
 
@@ -68,8 +90,12 @@ elif DATABASE_URL.startswith("postgresql+psycopg2://"):
 
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+if not DATABASE_URL.startswith("sqlite"):
+    # Serverless functions and Neon's pooler drop idle connections; check each
+    # pooled connection before use instead of failing the request.
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 300}
 JWT_SECRET = os.getenv("JWT_SECRET_KEY", "").strip()
-if os.getenv("FLASK_ENV", "").lower() == "production" and not JWT_SECRET:
+if IS_PRODUCTION and not JWT_SECRET:
     raise RuntimeError("JWT_SECRET_KEY must be configured in production")
 if not JWT_SECRET:
     JWT_SECRET = "local-development-only-change-me"
@@ -77,13 +103,61 @@ app.config["JWT_SECRET_KEY"] = JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_HOURS", "2")))
 app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=int(os.getenv("JWT_REFRESH_TOKEN_EXPIRES_DAYS", "30")))
 jwt = JWTManager(app)
+
+# Tokens issued after the password step but before the authenticator step may
+# only be used on the endpoint that completes that step.
+_PARTIAL_TOKEN_ENDPOINTS = {
+    "totp_setup": {"totp_setup", "verify_totp_setup"},
+    "totp_challenge": {"verify_login_totp", "login_recovery"},
+}
+
+
+@jwt.token_verification_loader
+def _restrict_partial_tokens(jwt_header, jwt_data):
+    stage = jwt_data.get("auth_stage")
+    return not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
+
+
+@jwt.token_verification_failed_loader
+def _partial_token_rejected(jwt_header, jwt_data):
+    return jsonify({"error": "Complete authenticator verification to continue"}), 401
+
 db.init_app(app)
 migrate = Migrate(app, db)
-limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["300 per minute"])
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["300 per minute"],
+    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
+)
+
+# Columns that were too narrow in earlier deployments. Encrypted TOTP secrets
+# are ~100 characters and overflowed VARCHAR(64) on PostgreSQL, which broke the
+# mandatory authenticator setup and therefore every login.
+_WIDENED_COLUMNS = (
+    "ALTER TABLE users ALTER COLUMN totp_secret TYPE VARCHAR(255)",
+    "ALTER TABLE users ALTER COLUMN totp_pending_secret TYPE VARCHAR(255)",
+    "ALTER TABLE policies ALTER COLUMN terms_document TYPE TEXT",
+)
+
+
+def ensure_schema():
+    """Create missing tables and widen legacy columns. Safe to run repeatedly."""
+    db.create_all()
+    if db.engine.dialect.name == "postgresql":
+        with db.engine.begin() as connection:
+            for statement in _WIDENED_COLUMNS:
+                connection.execute(sql_text(statement))
+
 
 with app.app_context():
-    if os.getenv("AUTO_CREATE_TABLES", "true").lower() == "true":
-        db.create_all()
+    if os.getenv("AUTO_CREATE_TABLES", "true").strip().lower() == "true":
+        try:
+            ensure_schema()
+        except Exception as schema_error:  # noqa: BLE001
+            # Keep the API importable so /health can report the problem.
+            app.logger.error("Database schema initialisation failed: %s", schema_error)
+            print(f"Database schema initialisation failed: {schema_error}")
 
 
 @app.errorhandler(400)
@@ -111,15 +185,26 @@ TOTP_REQUIRED_ROLES = VALID_ROLES
 
 def _fernet():
     key = os.getenv("TOTP_ENCRYPTION_KEY", "").strip()
-    if not key:
-        return None
-    return Fernet(key.encode())
+    if key:
+        try:
+            return Fernet(key.encode())
+        except ValueError as exc:
+            raise RuntimeError(
+                "TOTP_ENCRYPTION_KEY is not a valid Fernet key. Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            ) from exc
+    if IS_PRODUCTION:
+        # Without a key every login would fail (authenticator setup is mandatory),
+        # so derive one from the JWT secret. Set TOTP_ENCRYPTION_KEY explicitly so
+        # rotating JWT_SECRET_KEY does not invalidate stored authenticator secrets.
+        app.logger.warning("TOTP_ENCRYPTION_KEY is not set; deriving it from JWT_SECRET_KEY")
+        derived = base64.urlsafe_b64encode(hashlib.sha256(("totp:" + JWT_SECRET).encode()).digest())
+        return Fernet(derived)
+    return None
 
 def _encrypt_secret(secret):
     f = _fernet()
     if f is None:
-        if os.getenv("FLASK_ENV") == "production":
-            raise RuntimeError("TOTP_ENCRYPTION_KEY must be configured in production")
         return secret
     return f.encrypt(secret.encode()).decode()
 
@@ -146,6 +231,10 @@ def recovery_hashes(user):
 
 def auth_token(user):
     return create_access_token(identity=str(user.id), additional_claims={"role": user.role})
+
+
+def refresh_token(user):
+    return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role})
 
 
 def current_user_record():
@@ -224,15 +313,15 @@ max_charge = 50000.0
 
 def load_xgboost_model():
     global model_loaded, model, min_charge, max_charge
-    if XGBRegressor is None:
+    if xgb is None:
         raise RuntimeError("xgboost is not installed")
     model_path = os.path.join(MODEL_DIR, "insurance_xgb_model.json")
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"XGBoost model artifact not found: {model_path}")
-    loaded = XGBRegressor()
+    # The native Booster avoids XGBRegressor's hard dependency on scikit-learn,
+    # which is not installed in the production runtime.
+    loaded = xgb.Booster()
     loaded.load_model(model_path)
-    if not hasattr(loaded, "predict"):
-        raise RuntimeError("Loaded XGBoost artifact is invalid")
     model = loaded
 
     bounds_path = os.path.join(MODEL_DIR, "risk_bounds.pkl")
@@ -274,7 +363,7 @@ def refresh_access_token():
     user = current_user_record()
     if user is None:
         return jsonify({"error": "User not found"}), 404
-    return jsonify({"access_token": create_access_token(identity=str(user.id), additional_claims={"role": user.role})})
+    return jsonify({"access_token": auth_token(user)})
 
 
 @app.route("/auth/register", methods=["POST"])
@@ -367,12 +456,12 @@ def login():
         return jsonify({"error": "Invalid email or password"}), 401
 
     if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
-        setup_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
+        setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=15), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
     if user.totp_enabled:
         challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
         return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
-    return jsonify({"access_token": auth_token(user), "refresh_token": create_refresh_token(identity=str(user.id), additional_claims={"role": user.role}), "user": user.to_dict()})
+    return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict()})
 
 
 
@@ -412,7 +501,7 @@ def verify_totp_setup():
     user.recovery_codes_used = json.dumps([])
     audit(user.id, "totp_enabled", "user", user.id)
     db.session.commit()
-    return jsonify({"access_token": auth_token(user), "user": user.to_dict(), "recovery_codes": codes})
+    return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict(), "recovery_codes": codes})
 
 
 @app.route("/auth/login/verify-totp", methods=["POST"])
@@ -428,7 +517,7 @@ def verify_login_totp():
         return jsonify({"error": "TOTP verification unavailable"}), 400
     if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid authenticator code"}), 401
-    return jsonify({"access_token": auth_token(user), "refresh_token": create_refresh_token(identity=str(user.id), additional_claims={"role": user.role}), "user": user.to_dict()})
+    return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict()})
 
 
 @app.route("/auth/login/recovery", methods=["POST"])
@@ -449,7 +538,7 @@ def login_recovery():
             user.recovery_codes_hash = json.dumps(hashes)
             audit(user.id, "totp_recovery_used", "user", user.id)
             db.session.commit()
-            return jsonify({"access_token": auth_token(user), "user": user.to_dict()})
+            return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict()})
     return jsonify({"error": "Invalid or already used recovery code"}), 401
 
 
@@ -525,7 +614,8 @@ def process():
     region = region_map[region_raw]
 
     if model_loaded and model is not None:
-        prediction = float(model.predict([[age, sex, bmi, children, smoker, region]])[0])
+        features = np.array([[age, sex, bmi, children, smoker, region]], dtype=np.float32)
+        prediction = float(model.inplace_predict(features)[0])
         model_status = "xgboost"
     else:
         prediction = 3500.0 + age * 35.0 + bmi * 80.0 + children * 250.0 + smoker * 6500.0 + region * 250.0
@@ -684,7 +774,10 @@ def assign_underwriting(application_id):
     if application is None:
         return jsonify({"error": "Application not found"}), 404
     data = request.get_json(silent=True) or {}
-    assignee_id = int(data.get("underwriter_id", user.id))
+    try:
+        assignee_id = int(data.get("underwriter_id", user.id))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid underwriter"}), 400
     assignee = db.session.get(User, assignee_id)
     if assignee is None or assignee.role not in {"underwriter", "admin"}:
         return jsonify({"error": "Invalid underwriter"}), 400
@@ -853,9 +946,19 @@ def update_claim(claim_id):
     if "status" in data:
         claim.status = str(data["status"])
     if "approved_amount" in data:
-        claim.approved_amount = float(data["approved_amount"])
+        try:
+            approved_amount = float(data["approved_amount"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "approved_amount must be a number"}), 400
+        if not math.isfinite(approved_amount) or approved_amount < 0:
+            return jsonify({"error": "approved_amount must be a finite, non-negative number"}), 400
+        claim.approved_amount = approved_amount
     if "assigned_officer_id" in data:
-        officer = db.session.get(User, int(data["assigned_officer_id"]))
+        try:
+            officer_id = int(data["assigned_officer_id"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid claims officer"}), 400
+        officer = db.session.get(User, officer_id)
         if officer is None or officer.role != "claims_officer":
             return jsonify({"error": "Invalid claims officer"}), 400
         claim.assigned_officer_id = officer.id
@@ -1044,7 +1147,10 @@ def billing_create():
         return jsonify({"error":"Valid amount is required"}),400
     if not math.isfinite(amount) or amount <= 0:
         return jsonify({"error":"Amount must be a finite number greater than zero"}),400
-    p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id",0)))
+    try:
+        p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id") or 0))
+    except (TypeError, ValueError):
+        return jsonify({"error":"Invalid customer identifier"}),400
     if not p:return jsonify({"error":"Customer profile not found"}),404
     t=BillingTransaction(customer_id=p.id,policy_id=d.get("policy_id"),claim_id=d.get("claim_id"),transaction_type=str(d.get("transaction_type","premium")),amount=amount,status=str(d.get("status","pending")),reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
     db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id);db.session.commit();return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference}),201
@@ -1114,7 +1220,21 @@ def case_review(application_id):
 
 @app.route("/health/detailed",methods=["GET"])
 def detailed_health():
-    return jsonify({"status":"ok","database":db.session.execute(sql_text("SELECT 1")).scalar()==1,"model_loaded":model is not None,"environment":os.getenv("FLASK_ENV","development")})
+    try:
+        database_ok = db.session.execute(sql_text("SELECT 1")).scalar() == 1
+        database_error = None
+    except Exception as exc:  # noqa: BLE001
+        db.session.rollback()
+        database_ok = False
+        database_error = exc.__class__.__name__
+    return jsonify({
+        "status": "ok" if database_ok else "degraded",
+        "database": database_ok,
+        "database_dialect": db.engine.dialect.name,
+        "database_error": database_error,
+        "model_loaded": model is not None,
+        "environment": os.getenv("FLASK_ENV", "development"),
+    }), (200 if database_ok else 503)
 
 @app.route("/integrations/status",methods=["GET"])
 @roles_required("admin")
@@ -1127,7 +1247,47 @@ def integrations_status():
         "frontend_origin": bool(os.getenv("FRONTEND_ORIGIN"))
     })
 
+@app.cli.command("init-db")
+def init_db_command():
+    """Create all tables and widen legacy columns (idempotent)."""
+    ensure_schema()
+    click.echo("Database schema is ready.")
+
+
+@app.cli.command("create-admin")
+@click.option("--email", prompt=True)
+@click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True)
+def create_admin_command(email, password):
+    """Create an admin user, or promote an existing user to admin.
+
+    Public registration only creates customers, so this is how the first
+    admin/underwriter/claims officer accounts are bootstrapped.
+    """
+    email = email.strip().lower()
+    if len(password) < 8:
+        raise click.BadParameter("Password must be at least 8 characters", param_hint="--password")
+    ensure_schema()
+    user = User.query.filter_by(email=email).first()
+    if user is None:
+        user = User(email=email, role="admin")
+        user.set_password(password)
+        db.session.add(user)
+        db.session.flush()
+        audit(user.id, "admin_created_via_cli", "user", user.id)
+        click.echo(f"Created admin {email}")
+    else:
+        user.role = "admin"
+        user.set_password(password)
+        audit(user.id, "admin_promoted_via_cli", "user", user.id)
+        click.echo(f"Promoted existing user {email} to admin and reset their password")
+    db.session.commit()
+
+
 if __name__ == "__main__":
     print("Starting Flask server...")
     print(f"Model loaded: {model_loaded}")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5001")),  # 5000 is taken by macOS AirPlay Receiver
+        debug=os.getenv("FLASK_DEBUG", "0" if IS_PRODUCTION else "1") == "1",
+    )

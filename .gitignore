@@ -17,3 +17,8 @@ backend/__pycache__/
 .env
 .env.local
 .env.*.local
+
+.DS_Store
+*.db
+instance/
+*.tsbuildinfo
