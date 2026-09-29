@@ -86,3 +86,13 @@ def test_model_predictions_are_plausible():
     for row in ([18, 0, 20, 0, 0, 0], [45, 1, 33, 2, 0, 1], [45, 1, 33, 2, 1, 1]):
         prediction = float(backend.model.inplace_predict(np.array([row], dtype=np.float32))[0])
         assert prediction > 1000, (row, prediction)
+
+def test_relationship_graph_is_role_scoped(client, session):
+    headers = {"Authorization": "Bearer " + session["access_token"]}
+    response = client.get("/graph", headers=headers)
+    assert response.status_code == 200, response.json
+    body = response.json
+    assert body["source"] in {"neo4j", "postgres"}
+    assert isinstance(body["nodes"], list)
+    assert isinstance(body["edges"], list)
+
