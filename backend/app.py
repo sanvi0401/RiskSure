@@ -246,7 +246,7 @@ def verify_token_stage(jwt_header, jwt_data):
     # before get_jwt()/get_jwt_identity() is available in the request context.
     # Read the identity directly from the decoded claims instead of calling
     # current_user_record(), which depends on get_jwt_identity().
-    identity = jwt_data.get(config.identity_claim_key, jwt_data.get("sub"))
+    identity = jwt_data.get("sub")
     try:
         user_id = int(identity)
     except (TypeError, ValueError):
