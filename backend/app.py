@@ -403,6 +403,24 @@ def refresh_access_token():
     return jsonify({"access_token": auth_token(user)})
 
 
+@app.route("/auth/logout", methods=["POST"])
+@full_auth_required
+def logout():
+    user=current_user_record(); claims=get_jwt()
+    if user is None:return jsonify({"error":"User not found"}),404
+    if claims.get("jti"):
+        db.session.add(RevokedToken(jti=claims["jti"],user_id=user.id,expires_at=datetime.fromtimestamp(claims["exp"],tz=timezone.utc)))
+    data=request.get_json(silent=True) or {}; refresh=str(data.get("refresh_token","")).strip()
+    if refresh:
+        try:
+            decoded=decode_token(refresh)
+            if decoded.get("type")=="refresh" and decoded.get("sub")==str(user.id):
+                db.session.add(RevokedToken(jti=decoded["jti"],user_id=user.id,expires_at=datetime.fromtimestamp(decoded["exp"],tz=timezone.utc)))
+        except Exception: pass
+    user.token_version+=1; audit(user.id,"logout","user",user.id); db.session.commit()
+    return jsonify({"message":"Logged out"})
+
+
 @app.route("/auth/me", methods=["GET"])
 @full_auth_required
 def auth_me():
