@@ -471,14 +471,31 @@ def totp_setup():
     claims = get_jwt()
     if claims.get("auth_stage") != "totp_setup":
         return jsonify({"error": "TOTP setup session required"}), 403
+
     user = current_user_record()
     if user is None:
         return jsonify({"error": "User not found"}), 404
-    secret = pyotp.random_base32()
-    user.totp_pending_secret = _encrypt_secret(secret)
-    db.session.commit()
-    uri = pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="RiskSure")
-    return jsonify({"secret": secret, "otpauth_uri": uri})
+    if user.totp_enabled:
+        return jsonify({"error": "Google Authenticator is already enabled. Enter the current authenticator code."}), 409
+
+    # Keep the same pending secret for this setup session. Repeated requests
+    # (React Strict Mode, refreshes, retries, or transient network failures)
+    # must not silently replace the QR code the user already scanned.
+    secret = _decrypt_secret(user.totp_pending_secret) if user.totp_pending_secret else None
+    if not secret:
+        secret = pyotp.random_base32()
+        user.totp_pending_secret = _encrypt_secret(secret)
+        db.session.commit()
+
+    uri = pyotp.TOTP(secret).provisioning_uri(
+        name=user.email,
+        issuer_name="RiskSure",
+    )
+    return jsonify({
+        "secret": secret,
+        "otpauth_uri": uri,
+        "setup_required": True,
+    })
 
 
 @app.route("/auth/totp/verify-setup", methods=["POST"])
