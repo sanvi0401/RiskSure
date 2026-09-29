@@ -33,6 +33,28 @@ def test_health(client):
     assert client.get("/health").json["status"] == "ok"
 
 
+def test_registration_creates_customer_profile(client):
+    response = client.post("/auth/register", json={
+        "full_name": "Registration Test",
+        "email": "registration@example.com",
+        "password": "password123",
+    })
+    assert response.status_code == 201, response.json
+    user = response.json["user"]
+    assert user["role"] == "customer"
+
+    login = client.post("/auth/login", json={
+        "email": "registration@example.com",
+        "password": "password123",
+    })
+    assert login.status_code == 200, login.json
+    assert login.json["totp_setup_required"] is True
+
+    headers = {"Authorization": "Bearer " + login.json["setup_token"]}
+    setup = client.post("/auth/totp/setup", headers=headers)
+    assert setup.status_code == 200, setup.json
+
+
 def test_partial_tokens_cannot_access_protected_routes(client, session):
     login = client.post("/auth/login", json={"email": "smoke@example.com", "password": "password123"}).json
     challenge = {"Authorization": "Bearer " + login["challenge_token"]}
