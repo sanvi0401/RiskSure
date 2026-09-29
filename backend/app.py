@@ -51,6 +51,7 @@ from models import (
     CustomerProfile,
     Policy,
     Provider,
+    RevokedToken,
     User,
 )
 
@@ -235,11 +236,40 @@ def recovery_hashes(user):
 
 
 def auth_token(user):
-    return create_access_token(identity=str(user.id), additional_claims={"role": user.role})
+    return create_access_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
 
 
 def refresh_token(user):
-    return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role})
+    return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
+
+
+@jwt.token_in_blocklist_loader
+def token_is_revoked(jwt_header, jwt_data):
+    return RevokedToken.query.filter_by(jti=jwt_data.get("jti")).first() is not None
+
+
+@jwt.token_verification_loader
+def verify_token_stage(jwt_header, jwt_data):
+    stage = jwt_data.get("auth_stage")
+    user = current_user_record()
+    return user is not None and jwt_data.get("token_version", 0) == user.token_version and (
+        not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
+    )
+
+
+@jwt.token_verification_failed_loader
+def token_verification_failed(jwt_header, jwt_data):
+    return jsonify({"error": "Complete authenticator verification to continue"}), 401
+
+
+def full_auth_required(view):
+    @wraps(view)
+    @jwt_required()
+    def wrapped(*args, **kwargs):
+        if get_jwt().get("auth_stage"):
+            return jsonify({"error": "Complete authenticator verification to continue"}), 401
+        return view(*args, **kwargs)
+    return wrapped
 
 
 def current_user_record():
@@ -258,6 +288,8 @@ def roles_required(*allowed_roles):
         @wraps(view)
         @jwt_required()
         def wrapped(*args, **kwargs):
+            if get_jwt().get("auth_stage"):
+                return jsonify({"error": "Complete authenticator verification to continue"}), 401
             user = current_user_record()
             if user is None:
                 return jsonify({"error": "User not found"}), 404
@@ -372,7 +404,7 @@ def refresh_access_token():
 
 
 @app.route("/auth/me", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def auth_me():
     user = current_user_record()
     if user is None:
@@ -437,6 +469,7 @@ def reset_password_with_totp():
         return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
 
     user.set_password(new_password)
+    user.token_version += 1
     audit(user.id, "password_reset_with_totp", "user", user.id)
     db.session.commit()
     return jsonify({"message": "Password reset successfully"})
@@ -464,6 +497,7 @@ def reset_password_with_recovery():
             hashes.pop(i)
             user.recovery_codes_hash = json.dumps(hashes)
             user.set_password(new_password)
+            user.token_version += 1
             audit(user.id, "password_reset_with_recovery", "user", user.id)
             db.session.commit()
             return jsonify({"message": "Password reset successfully. You can now sign in."})
@@ -483,10 +517,10 @@ def login():
         return jsonify({"error": "Invalid email or password"}), 401
 
     if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
-        setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=15), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
+        setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=10), additional_claims={"role": user.role, "auth_stage": "totp_setup", "token_version": user.token_version})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
     if user.totp_enabled:
-        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
+        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge", "token_version": user.token_version})
         return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
     return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict()})
 
@@ -587,7 +621,7 @@ def login_recovery():
 
 
 @app.route("/auth/totp/disable", methods=["POST"])
-@jwt_required()
+@full_auth_required
 def disable_totp():
     user = current_user_record()
     code = str((request.get_json(silent=True) or {}).get("code", "")).replace(" ", "")
@@ -598,6 +632,7 @@ def disable_totp():
     user.totp_pending_secret = None
     user.recovery_codes_hash = None
     user.recovery_codes_used = None
+    user.token_version += 1
     audit(user.id, "totp_disabled", "user", user.id)
     db.session.commit()
     return jsonify({"message": "TOTP disabled"})
@@ -776,7 +811,7 @@ def save():
 
 
 @app.route("/applications", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def get_applications():
     user = current_user_record()
     if user is None:
@@ -862,7 +897,7 @@ def underwriting_decision(application_id):
 
 
 @app.route("/applications/<int:application_id>", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def get_application(application_id):
     user = current_user_record()
     if user is None:
