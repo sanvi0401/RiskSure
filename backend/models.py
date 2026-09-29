@@ -17,6 +17,7 @@ class User(db.Model):
     recovery_codes_hash = db.Column(db.Text, nullable=True)
     totp_pending_secret = db.Column(db.String(255), nullable=True)
     recovery_codes_used = db.Column(db.Text, nullable=True)
+    token_version = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

@@ -13,7 +13,7 @@ except ImportError:
 
 import base64
 import hashlib
-from datetime import timedelta
+from datetime import date, datetime, timezone, timedelta
 from functools import wraps
 
 import click
@@ -54,7 +54,9 @@ from models import (
     User,
 )
 
-IS_PRODUCTION = os.getenv("FLASK_ENV", "").strip().lower() == "production"
+RISKSURE_ENV = os.getenv("RISKSURE_ENV", "").strip().lower()
+ALLOW_INSECURE_DEV = os.getenv("RISKSURE_ALLOW_INSECURE_DEV", "").strip().lower() == "true"
+IS_PRODUCTION = RISKSURE_ENV == "production" or os.getenv("VERCEL", "").strip() == "1"
 
 app = Flask(__name__)
 # Vercel/Render/Railway sit behind a proxy; trust its X-Forwarded-* headers so
@@ -65,7 +67,9 @@ _frontend_origins = [
     for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_ORIGIN", "")).split(",")
     if origin.strip()
 ]
-_allowed_origins = ["https://risk-sure-od3i.vercel.app", *_frontend_origins]
+_allowed_origins = list(_frontend_origins)
+if IS_PRODUCTION and not _allowed_origins:
+    raise RuntimeError("FRONTEND_ORIGINS or FRONTEND_ORIGIN must be configured in production")
 if not IS_PRODUCTION:
     _allowed_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])
 CORS(
@@ -76,8 +80,8 @@ CORS(
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "").strip()
 if not DATABASE_URL:
-    if IS_PRODUCTION:
-        raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured in production")
+    if IS_PRODUCTION or not ALLOW_INSECURE_DEV:
+        raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured unless RISKSURE_ALLOW_INSECURE_DEV=true")
     DATABASE_URL = "sqlite:///risksure.db"
 
 # Vercel's Python runtime uses a PostgreSQL adapter explicitly configured here.
@@ -96,9 +100,9 @@ if not DATABASE_URL.startswith("sqlite"):
     # pooled connection before use instead of failing the request.
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 300}
 JWT_SECRET = os.getenv("JWT_SECRET_KEY", "").strip()
-if IS_PRODUCTION and not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET_KEY must be configured in production")
 if not JWT_SECRET:
+    if IS_PRODUCTION or not ALLOW_INSECURE_DEV:
+        raise RuntimeError("JWT_SECRET_KEY must be configured unless RISKSURE_ALLOW_INSECURE_DEV=true")
     JWT_SECRET = "local-development-only-change-me"
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_HOURS", "2")))
@@ -113,23 +117,26 @@ _PARTIAL_TOKEN_ENDPOINTS = {
 }
 
 
-@jwt.token_verification_loader
-def _restrict_partial_tokens(jwt_header, jwt_data):
-    stage = jwt_data.get("auth_stage")
-    return not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
-
-
-@jwt.token_verification_failed_loader
-def _partial_token_rejected(jwt_header, jwt_data):
-    return jsonify({"error": "Complete authenticator verification to continue"}), 401
-
 db.init_app(app)
 migrate = Migrate(app, db)
+
+def ensure_token_version_column():
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(sql_text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
+    except Exception:
+        pass
+
+with app.app_context():
+    ensure_token_version_column()
+RATE_LIMIT_STORAGE = os.getenv("RATELIMIT_STORAGE_URI", "").strip()
+if IS_PRODUCTION and not RATE_LIMIT_STORAGE:
+    raise RuntimeError("RATELIMIT_STORAGE_URI must be configured in production")
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["300 per minute"],
-    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
+    storage_uri=RATE_LIMIT_STORAGE or "memory://",
 )
 
 # Columns that were too narrow in earlier deployments. Encrypted TOTP secrets
@@ -143,7 +150,7 @@ _WIDENED_COLUMNS = (
 
 
 def ensure_schema():
-    """Create missing tables and widen legacy columns. Safe to run repeatedly."""
+    """Create missing tables and apply small additive compatibility changes."""
     db.create_all()
     if db.engine.dialect.name == "postgresql":
         with db.engine.begin() as connection:
@@ -152,7 +159,7 @@ def ensure_schema():
 
 
 with app.app_context():
-    if os.getenv("AUTO_CREATE_TABLES", "true").strip().lower() == "true":
+    if os.getenv("AUTO_CREATE_TABLES", "false").strip().lower() == "true":
         try:
             ensure_schema()
         except Exception as schema_error:  # noqa: BLE001
@@ -200,12 +207,7 @@ def _fernet():
                 "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             ) from exc
     if IS_PRODUCTION:
-        # Without a key every login would fail (authenticator setup is mandatory),
-        # so derive one from the JWT secret. Set TOTP_ENCRYPTION_KEY explicitly so
-        # rotating JWT_SECRET_KEY does not invalidate stored authenticator secrets.
-        app.logger.warning("TOTP_ENCRYPTION_KEY is not set; deriving it from JWT_SECRET_KEY")
-        derived = base64.urlsafe_b64encode(hashlib.sha256(("totp:" + JWT_SECRET).encode()).digest())
-        return Fernet(derived)
+        raise RuntimeError("TOTP_ENCRYPTION_KEY must be configured in production")
     return None
 
 def _encrypt_secret(secret):
@@ -236,11 +238,35 @@ def recovery_hashes(user):
 
 
 def auth_token(user):
-    return create_access_token(identity=str(user.id), additional_claims={"role": user.role})
+    return create_access_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
 
 
 def refresh_token(user):
-    return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role})
+    return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
+
+
+@jwt.token_verification_loader
+def verify_token_stage(jwt_header, jwt_data):
+    stage = jwt_data.get("auth_stage")
+    user = current_user_record()
+    return user is not None and jwt_data.get("token_version", 0) == user.token_version and (
+        not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
+    )
+
+
+@jwt.token_verification_failed_loader
+def token_verification_failed(jwt_header, jwt_data):
+    return jsonify({"error": "Complete authenticator verification to continue"}), 401
+
+
+def full_auth_required(view):
+    @wraps(view)
+    @jwt_required()
+    def wrapped(*args, **kwargs):
+        if get_jwt().get("auth_stage"):
+            return jsonify({"error": "Complete authenticator verification to continue"}), 401
+        return view(*args, **kwargs)
+    return wrapped
 
 
 def current_user_record():
@@ -259,6 +285,8 @@ def roles_required(*allowed_roles):
         @wraps(view)
         @jwt_required()
         def wrapped(*args, **kwargs):
+            if get_jwt().get("auth_stage"):
+                return jsonify({"error": "Complete authenticator verification to continue"}), 401
             user = current_user_record()
             if user is None:
                 return jsonify({"error": "User not found"}), 404
@@ -372,8 +400,19 @@ def refresh_access_token():
     return jsonify({"access_token": auth_token(user)})
 
 
+@app.route("/auth/logout", methods=["POST"])
+@full_auth_required
+def logout():
+    user=current_user_record()
+    if user is None:return jsonify({"error":"User not found"}),404
+    user.token_version += 1
+    audit(user.id,"logout","user",user.id)
+    db.session.commit()
+    return jsonify({"message":"Logged out"})
+
+
 @app.route("/auth/me", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def auth_me():
     user = current_user_record()
     if user is None:
@@ -438,6 +477,7 @@ def reset_password_with_totp():
         return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
 
     user.set_password(new_password)
+    user.token_version += 1
     audit(user.id, "password_reset_with_totp", "user", user.id)
     db.session.commit()
     return jsonify({"message": "Password reset successfully"})
@@ -465,6 +505,7 @@ def reset_password_with_recovery():
             hashes.pop(i)
             user.recovery_codes_hash = json.dumps(hashes)
             user.set_password(new_password)
+            user.token_version += 1
             audit(user.id, "password_reset_with_recovery", "user", user.id)
             db.session.commit()
             return jsonify({"message": "Password reset successfully. You can now sign in."})
@@ -484,16 +525,17 @@ def login():
         return jsonify({"error": "Invalid email or password"}), 401
 
     if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
-        setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=15), additional_claims={"role": user.role, "auth_stage": "totp_setup"})
+        setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=10), additional_claims={"role": user.role, "auth_stage": "totp_setup", "token_version": user.token_version})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
     if user.totp_enabled:
-        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge"})
+        challenge_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=5), additional_claims={"role": user.role, "auth_stage": "totp_challenge", "token_version": user.token_version})
         return jsonify({"requires_totp": True, "challenge_token": challenge_token, "user": user.to_dict()})
     return jsonify({"access_token": auth_token(user), "refresh_token": refresh_token(user), "user": user.to_dict()})
 
 
 
 @app.route("/auth/totp/setup", methods=["POST"])
+@limiter.limit("10 per minute")
 @jwt_required()
 def totp_setup():
     claims = get_jwt()
@@ -527,6 +569,7 @@ def totp_setup():
 
 
 @app.route("/auth/totp/verify-setup", methods=["POST"])
+@limiter.limit("10 per minute")
 @jwt_required()
 def verify_totp_setup():
     claims = get_jwt()
@@ -588,7 +631,7 @@ def login_recovery():
 
 
 @app.route("/auth/totp/disable", methods=["POST"])
-@jwt_required()
+@full_auth_required
 def disable_totp():
     user = current_user_record()
     code = str((request.get_json(silent=True) or {}).get("code", "")).replace(" ", "")
@@ -599,6 +642,7 @@ def disable_totp():
     user.totp_pending_secret = None
     user.recovery_codes_hash = None
     user.recovery_codes_used = None
+    user.token_version += 1
     audit(user.id, "totp_disabled", "user", user.id)
     db.session.commit()
     return jsonify({"message": "TOTP disabled"})
@@ -620,164 +664,63 @@ def staff_only():
     return jsonify({"message": "Staff access granted", "role": user.role})
 
 
+def calculate_underwriting(data):
+    try:
+        age=float(data.get("age",0)); bmi=float(data.get("bmi",0)); children=float(data.get("children",0))
+        sex=str(data.get("sex","")).strip().lower(); smoker=str(data.get("smoker","")).strip().lower(); region=str(data.get("region","")).strip().lower()
+    except (TypeError,ValueError):
+        raise ValueError("Invalid underwriting input")
+    if not all(math.isfinite(v) for v in (age,bmi,children)): raise ValueError("Underwriting values must be finite")
+    if age<=0 or age>120 or not age.is_integer(): raise ValueError("Age must be a whole number between 1 and 120")
+    if bmi<=0 or bmi>100: raise ValueError("BMI must be between 0 and 100")
+    if children<0 or children>30 or not children.is_integer(): raise ValueError("Children must be a whole number between 0 and 30")
+    sm={"male":1,"female":0}; sn={"yes":1,"no":0,"true":1,"false":0,"1":1,"0":0}; rg={"southwest":0,"southeast":1,"northwest":2,"northeast":3}
+    if sex not in sm: raise ValueError("Sex must be male or female")
+    if smoker not in sn: raise ValueError("Smoker status must be yes or no")
+    if region not in rg: raise ValueError("Invalid region")
+    sv,smv,rv=sm[sex],sn[smoker],rg[region]
+    if model_loaded and model is not None:
+        prediction=float(model.inplace_predict(np.array([[age,sv,bmi,children,smv,rv]],dtype=np.float32))[0]); status="xgboost"
+    else:
+        prediction=3500.0+age*35.0+bmi*80.0+children*250.0+smv*6500.0+rv*250.0; status="deterministic_fallback"
+    risk=max(0.0,min(1.0,(prediction-min_charge)/max(max_charge-min_charge,1.0)))
+    adjustment=(0.20 if smv else 0.0)+(0.05 if bmi>30 else 0.0)+(0.05 if children>2 else 0.0)
+    final=min(1.0,risk+adjustment)
+    decision="Approved" if final<0.5 else "Approved with Conditions" if final<=0.9 else "Manual Review"
+    return {"risk_score":round(risk,4),"rule_adjustment":round(adjustment,4),"final_risk":round(final,4),"decision":decision,"premium":round(5000.0*(1.0+final),2),"model_status":status}
+
 @app.route("/process", methods=["POST"])
 @roles_required("customer", "underwriter", "admin")
 def process():
-    data = request.get_json(silent=True) or {}
-
-    try:
-        age = float(data.get("age", 0))
-        sex_raw = str(data.get("sex", "")).strip().lower()
-        bmi = float(data.get("bmi", 0.0))
-        children = float(data.get("children", 0))
-        smoker_raw = str(data.get("smoker", "")).strip().lower()
-        region_raw = str(data.get("region", "")).strip().lower()
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid underwriting input"}), 400
-
-    if not all(math.isfinite(v) for v in (age, bmi, children)):
-        return jsonify({"error": "Underwriting values must be finite numbers"}), 400
-    if age <= 0 or age > 120 or not age.is_integer():
-        return jsonify({"error": "Age must be a whole number between 1 and 120"}), 400
-    if bmi <= 0 or bmi > 100:
-        return jsonify({"error": "BMI must be between 0 and 100"}), 400
-    if children < 0 or children > 30 or not children.is_integer():
-        return jsonify({"error": "Children must be a whole number between 0 and 30"}), 400
-
-    sex_map = {"male": 1, "female": 0}
-    smoker_map = {"yes": 1, "no": 0, "true": 1, "false": 0, "1": 1, "0": 0}
-    region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
-    if sex_raw not in sex_map:
-        return jsonify({"error": "Sex must be male or female"}), 400
-    if smoker_raw not in smoker_map:
-        return jsonify({"error": "Smoker status must be yes or no"}), 400
-    if region_raw not in region_map:
-        return jsonify({"error": "Invalid region"}), 400
-
-    sex = sex_map[sex_raw]
-    smoker = smoker_map[smoker_raw]
-    region = region_map[region_raw]
-
-    if model_loaded and model is not None:
-        features = np.array([[age, sex, bmi, children, smoker, region]], dtype=np.float32)
-        prediction = float(model.inplace_predict(features)[0])
-        model_status = "xgboost"
-    else:
-        prediction = 3500.0 + age * 35.0 + bmi * 80.0 + children * 250.0 + smoker * 6500.0 + region * 250.0
-        model_status = "deterministic_fallback"
-    risk_score = (prediction - min_charge) / max(max_charge - min_charge, 1.0)
-    risk_score = max(0.0, min(1.0, float(risk_score)))
-
-    rule_adjustments = []
-    rule_adjustment = 0.0
-    if smoker == 1:
-        rule_adjustment += 0.20
-        rule_adjustments.append({"rule": "smoker", "adjustment": 0.20, "reason": "Smoking status increases modeled risk."})
-    if bmi > 30:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "high_bmi", "adjustment": 0.05, "reason": "BMI is above 30."})
-    if children > 2:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "dependents", "adjustment": 0.05, "reason": "More than two dependents are present."})
-
-    final_risk = min(1.0, risk_score + rule_adjustment)
-    if final_risk < 0.5:
-        decision = "Approved"
-    elif final_risk <= 0.9:
-        decision = "Approved with Conditions"
-    else:
-        decision = "Manual Review"
-
-    premium = 5000.0 * (1.0 + final_risk)
-    shap_explanation = []
-    if explainer is not None and model is not None:
-        shap_values = explainer([[age, sex, bmi, children, smoker, region]])
-        contributions = list(shap_values.values[0])
-        for name, contribution in zip(feature_names, contributions):
-            shap_explanation.append({
-                "feature": name,
-                "contribution": round(float(contribution), 4),
-                "direction": "increases" if contribution > 0 else "decreases" if contribution < 0 else "neutral",
-            })
-        shap_explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
-
-    return jsonify({
-        "predicted_charge": prediction,
-        "risk_score": round(risk_score, 4),
-        "rule_adjustment": round(rule_adjustment, 4),
-        "applied_rules": rule_adjustments,
-        "final_risk": round(final_risk, 4),
-        "decision": decision,
-        "premium": round(premium, 2),
-        "model_status": model_status,
-        "explanation": {"method": "SHAP", "features": shap_explanation},
-    })
+    try: result=calculate_underwriting(request.get_json(silent=True) or {})
+    except ValueError as exc: return jsonify({"error":str(exc)}),400
+    return jsonify(result)
 
 
 @app.route("/save", methods=["POST"])
 @roles_required("customer", "underwriter", "admin")
 def save():
-    data = request.get_json(silent=True) or {}
-    user = current_user_record()
-
-    required = ("name", "age", "sex", "bmi", "children", "smoker", "region", "risk_score", "final_risk", "decision", "premium")
-    if any(data.get(key) in (None, "") for key in required):
-        return jsonify({"error": "Complete application data is required"}), 400
-    try:
-        age = int(data["age"])
-        bmi = float(data["bmi"])
-        children = int(data["children"])
-        risk_score = float(data["risk_score"])
-        final_risk = float(data["final_risk"])
-        premium = float(data["premium"])
-        rule_adjustment = float(data.get("rule_adjustment", 0.0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Application numeric fields are invalid"}), 400
-
-    if not all(math.isfinite(v) for v in (bmi, risk_score, final_risk, premium, rule_adjustment)):
-        return jsonify({"error": "Application numeric fields must be finite"}), 400
-    if age <= 0 or age > 120 or children < 0 or age > 120 or bmi <= 0 or bmi > 100 or children > 30 or risk_score < 0 or risk_score > 1 or final_risk < 0 or final_risk > 1 or premium < 0:
-        return jsonify({"error": "Application values are outside supported ranges"}), 400
-
-    customer_id = None
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            profile = CustomerProfile(user_id=user.id, full_name=str(data.get("name", "Unknown")))
-            db.session.add(profile)
-            db.session.flush()
-        customer_id = profile.id
-    elif data.get("customer_id"):
-        try:
-            customer_id = int(data["customer_id"])
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid customer identifier"}), 400
-
-    application = Application(
-        customer_id=customer_id,
-        name=data.get("name", "Unknown"),
-        age=age,
-        sex=data.get("sex"),
-        bmi=bmi,
-        children=children,
-        smoker=data.get("smoker"),
-        region=data.get("region"),
-        risk_score=risk_score,
-        rule_adjustment=rule_adjustment,
-        final_risk=final_risk,
-        decision=str(data.get("decision", "Unknown")),
-        premium=premium,
-    )
-
-    db.session.add(application)
-    db.session.flush()
-    audit(user.id, "application_created", "application", application.id)
-    db.session.commit()
-    return jsonify({"message": "Application saved successfully", "application": application.to_dict()})
+    data=request.get_json(silent=True) or {}; user=current_user_record()
+    if any(data.get(k) in (None,"") for k in ("name","age","sex","bmi","children","smoker","region")):
+        return jsonify({"error":"Complete application data is required"}),400
+    try: result=calculate_underwriting(data)
+    except ValueError as exc: return jsonify({"error":str(exc)}),400
+    if user.role=="customer":
+        profile=customer_for_user(user)
+        if profile is None:return jsonify({"error":"Customer profile not found"}),404
+        customer_id=profile.id; name=profile.full_name
+    else:
+        try: customer_id=int(data.get("customer_id"))
+        except (TypeError,ValueError): return jsonify({"error":"A valid customer_id is required"}),400
+        if db.session.get(CustomerProfile,customer_id) is None:return jsonify({"error":"Customer profile not found"}),404
+        name=" ".join(str(data.get("name","")).split())[:120] or "Unknown"
+    a=Application(customer_id=customer_id,name=name,age=int(float(data["age"])),sex=str(data["sex"]).strip().lower(),bmi=float(data["bmi"]),children=int(float(data["children"])),smoker=str(data["smoker"]).strip().lower(),region=str(data["region"]).strip().lower(),risk_score=result["risk_score"],rule_adjustment=result["rule_adjustment"],final_risk=result["final_risk"],decision=result["decision"],premium=result["premium"],review_status="pending")
+    db.session.add(a);db.session.flush();audit(user.id,"application_created","application",a.id,{"model_status":result["model_status"]});db.session.commit()
+    return jsonify({"message":"Application saved successfully","application":a.to_dict()})
 
 
 @app.route("/applications", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def get_applications():
     user = current_user_record()
     if user is None:
@@ -842,6 +785,8 @@ def underwriting_decision(application_id):
         return jsonify({"error": "Application not found"}), 404
     if application.assigned_underwriter_id not in {None, user.id} and user.role != "admin":
         return jsonify({"error": "Application is assigned to another underwriter"}), 403
+    if application.review_status == "completed":
+        return jsonify({"error": "A completed underwriting decision cannot be overwritten"}), 409
     data = request.get_json(silent=True) or {}
     decision = str(data.get("decision", "")).strip()
     if decision not in {"Approved", "Approved with Conditions", "Manual Review", "Rejected"}:
@@ -854,16 +799,36 @@ def underwriting_decision(application_id):
     application.review_status = "completed" if decision != "Manual Review" else "manual_review"
     application.reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
     application.assigned_underwriter_id = user.id if application.assigned_underwriter_id is None else application.assigned_underwriter_id
-    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason})
+    policy_id = None
+    if decision in {"Approved", "Approved with Conditions"} and application.customer_id:
+        existing = Policy.query.filter_by(customer_id=application.customer_id, status="active").first()
+        if existing is None:
+            policy = Policy(
+                policy_number=f"RS-POL-{os.urandom(5).hex().upper()}",
+                customer_id=application.customer_id,
+                policy_type="health",
+                status="active",
+                coverage_limit=100000.0,
+                premium_amount=float(application.premium),
+                start_date=date.today(),
+                end_date=date.fromordinal(date.today().toordinal() + 365),
+                terms_document=f"Policy created from approved RiskSure application #{application.id}.",
+            )
+            db.session.add(policy)
+            db.session.flush()
+            policy_id = policy.id
+        else:
+            policy_id = existing.id
+    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason, "policy_id": policy_id})
     db.session.commit()
     return jsonify({"message": "Underwriting decision recorded", "application": {
         "id": application.id, "decision": application.decision, "decision_reason": application.decision_reason,
-        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None
+        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None, "policy_id": policy_id
     }})
 
 
 @app.route("/applications/<int:application_id>", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def get_application(application_id):
     user = current_user_record()
     if user is None:
@@ -924,7 +889,7 @@ def create_claim():
     if not math.isfinite(claimed_amount) or claimed_amount <= 0:
         return jsonify({"error": "Claimed amount must be a finite number greater than zero"}), 400
 
-    customer_id = data.get("customer_id")
+    customer_id = policy.customer_id
     provider_id = data.get("provider_id")
 
     if user.role == "customer":
@@ -989,14 +954,17 @@ def update_claim(claim_id):
 
     data = request.get_json(silent=True) or {}
     if "status" in data:
-        claim.status = str(data["status"])
+        status = str(data["status"]).strip().lower()
+        if status not in {"submitted","in_review","approved","rejected","paid"}:
+            return jsonify({"error":"Invalid claim status"}),400
+        claim.status = status
     if "approved_amount" in data:
         try:
             approved_amount = float(data["approved_amount"])
         except (TypeError, ValueError):
             return jsonify({"error": "approved_amount must be a number"}), 400
-        if not math.isfinite(approved_amount) or approved_amount < 0:
-            return jsonify({"error": "approved_amount must be a finite, non-negative number"}), 400
+        if not math.isfinite(approved_amount) or approved_amount < 0 or approved_amount > claim.claimed_amount:
+            return jsonify({"error": "approved_amount must be finite, non-negative, and no greater than the claimed amount"}), 400
         claim.approved_amount = approved_amount
     if "assigned_officer_id" in data:
         try:
@@ -1199,8 +1167,8 @@ def billing_create():
             return jsonify({"error":"Invalid customer identifier"}),400
     if not p:return jsonify({"error":"Customer profile not found"}),404
     policy=db.session.get(Policy,policy_id)
-    if policy is None or policy.customer_id != p.id:
-        return jsonify({"error":"Policy not found for this customer"}),404
+    if policy is None or policy.customer_id != p.id or policy.status != "active":
+        return jsonify({"error":"Policy is not an active policy for this customer"}),404
     # Premiums are calculated by underwriting; never trust a client-supplied
     # payment amount. Record the policy's authoritative premium instead.
     amount=float(policy.premium_amount or 0.0)
