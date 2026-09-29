@@ -22,7 +22,7 @@ jobs:
       - name: Run backend tests
         env:
           DATABASE_URL: sqlite:///ci.db
-          JWT_SECRET_KEY: ci-test-secret-key-long-enough
+          JWT_SECRET_KEY: ci-test-secret-key-long-enough-32-bytes
           RISKSURE_ALLOW_INSECURE_DEV: "true"
           AUTO_CREATE_TABLES: "false"
         run: python -m pytest tests -q
