@@ -788,6 +788,8 @@ def underwriting_decision(application_id):
         return jsonify({"error": "Application not found"}), 404
     if application.assigned_underwriter_id not in {None, user.id} and user.role != "admin":
         return jsonify({"error": "Application is assigned to another underwriter"}), 403
+    if application.review_status == "completed":
+        return jsonify({"error": "A completed underwriting decision cannot be overwritten"}), 409
     data = request.get_json(silent=True) or {}
     decision = str(data.get("decision", "")).strip()
     if decision not in {"Approved", "Approved with Conditions", "Manual Review", "Rejected"}:
@@ -800,11 +802,31 @@ def underwriting_decision(application_id):
     application.review_status = "completed" if decision != "Manual Review" else "manual_review"
     application.reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
     application.assigned_underwriter_id = user.id if application.assigned_underwriter_id is None else application.assigned_underwriter_id
-    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason})
+    policy_id = None
+    if decision in {"Approved", "Approved with Conditions"} and application.customer_id:
+        existing = Policy.query.filter_by(customer_id=application.customer_id, status="active").first()
+        if existing is None:
+            policy = Policy(
+                policy_number=f"RS-POL-{os.urandom(5).hex().upper()}",
+                customer_id=application.customer_id,
+                policy_type="health",
+                status="active",
+                coverage_limit=100000.0,
+                premium_amount=float(application.premium),
+                start_date=date.today(),
+                end_date=date.fromordinal(date.today().toordinal() + 365),
+                terms_document=f"Policy created from approved RiskSure application #{application.id}.",
+            )
+            db.session.add(policy)
+            db.session.flush()
+            policy_id = policy.id
+        else:
+            policy_id = existing.id
+    audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason, "policy_id": policy_id})
     db.session.commit()
     return jsonify({"message": "Underwriting decision recorded", "application": {
         "id": application.id, "decision": application.decision, "decision_reason": application.decision_reason,
-        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None
+        "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None, "policy_id": policy_id
     }})
 
 
