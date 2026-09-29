@@ -17,6 +17,7 @@ class User(db.Model):
     recovery_codes_hash = db.Column(db.Text, nullable=True)
     totp_pending_secret = db.Column(db.String(255), nullable=True)
     recovery_codes_used = db.Column(db.Text, nullable=True)
+    token_version = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -195,3 +196,14 @@ class AuditLog(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     user = db.relationship("User", backref="audit_logs")
+
+
+class RevokedToken(db.Model):
+    __tablename__ = "revoked_tokens"
+
+    jti = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    user = db.relationship("User", backref="revoked_tokens")
