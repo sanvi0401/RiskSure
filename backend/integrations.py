@@ -239,4 +239,4 @@ def analyze_claim_image(image_path: str) -> dict:
         ]
         return {"cv_available": True, "detections": detections}
     except Exception as exc:
-        return {"cv_available": False, "detections": [], "reason": str(exc)}
+        return {"cv_available": False, "detections": [], "reason": "Image analysis is unavailable."}
