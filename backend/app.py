@@ -957,14 +957,17 @@ def update_claim(claim_id):
 
     data = request.get_json(silent=True) or {}
     if "status" in data:
-        claim.status = str(data["status"])
+        status = str(data["status"]).strip().lower()
+        if status not in {"submitted","in_review","approved","rejected","paid"}:
+            return jsonify({"error":"Invalid claim status"}),400
+        claim.status = status
     if "approved_amount" in data:
         try:
             approved_amount = float(data["approved_amount"])
         except (TypeError, ValueError):
             return jsonify({"error": "approved_amount must be a number"}), 400
-        if not math.isfinite(approved_amount) or approved_amount < 0:
-            return jsonify({"error": "approved_amount must be a finite, non-negative number"}), 400
+        if not math.isfinite(approved_amount) or approved_amount < 0 or approved_amount > claim.claimed_amount:
+            return jsonify({"error": "approved_amount must be finite, non-negative, and no greater than the claimed amount"}), 400
         claim.approved_amount = approved_amount
     if "assigned_officer_id" in data:
         try:
