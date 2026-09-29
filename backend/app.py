@@ -161,6 +161,11 @@ with app.app_context():
             print(f"Database schema initialisation failed: {schema_error}")
 
 
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"service": "RiskSure backend", "status": "ok", "health": "/health"})
+
+
 @app.errorhandler(400)
 def bad_request(error):
     return jsonify({"error": "Bad request"}), 400
