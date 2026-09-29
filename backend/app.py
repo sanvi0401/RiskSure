@@ -643,7 +643,7 @@ def disable_totp():
 
 
 @app.route("/auth/me", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def current_user():
     user = current_user_record()
     if user is None:
@@ -1027,6 +1027,7 @@ def admin_update_role(user_id):
         return jsonify({"error": "An admin cannot remove their own admin role"}), 400
 
     user.role = role
+    user.token_version += 1
     audit(admin.id, "user_role_changed", "user", user.id, {"role": role})
     db.session.commit()
     return jsonify({"message": "Role updated", "user": user.to_dict()})
