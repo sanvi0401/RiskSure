@@ -543,6 +543,7 @@ def login():
 
 
 @app.route("/auth/totp/setup", methods=["POST"])
+@limiter.limit("10 per minute")
 @jwt_required()
 def totp_setup():
     claims = get_jwt()
@@ -576,6 +577,7 @@ def totp_setup():
 
 
 @app.route("/auth/totp/verify-setup", methods=["POST"])
+@limiter.limit("10 per minute")
 @jwt_required()
 def verify_totp_setup():
     claims = get_jwt()
