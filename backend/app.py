@@ -242,8 +242,17 @@ def refresh_token(user):
 
 @jwt.token_verification_loader
 def verify_token_stage(jwt_header, jwt_data):
+    # Flask-JWT-Extended runs this callback while decoding the token,
+    # before get_jwt()/get_jwt_identity() is available in the request context.
+    # Read the identity directly from the decoded claims instead of calling
+    # current_user_record(), which depends on get_jwt_identity().
+    identity = jwt_data.get(config.identity_claim_key, jwt_data.get("sub"))
+    try:
+        user_id = int(identity)
+    except (TypeError, ValueError):
+        return False
+    user = db.session.get(User, user_id)
     stage = jwt_data.get("auth_stage")
-    user = current_user_record()
     return user is not None and jwt_data.get("token_version", 0) == user.token_version and (
         not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
     )
