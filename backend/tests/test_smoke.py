@@ -20,7 +20,7 @@ def client():
 
 @pytest.fixture(scope="module")
 def session(client):
-    client.post("/auth/register", json={"email": "smoke@example.com", "password": "password123"})
+    client.post("/auth/register", json={"full_name": "Smoke User", "email": "smoke@example.com", "password": "password123"})
     setup = client.post("/auth/login", json={"email": "smoke@example.com", "password": "password123"}).json
     headers = {"Authorization": "Bearer " + setup["setup_token"]}
     secret = client.post("/auth/totp/setup", headers=headers).json["secret"]
