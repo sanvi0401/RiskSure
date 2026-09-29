@@ -33,7 +33,33 @@ interface AuthContextType {
 const AuthContext=createContext<AuthContextType|undefined>(undefined)
 export function AuthProvider({children}:{children:ReactNode}){
  const [user,setUser]=useState<AuthUser|null>(null),[token,setToken]=useState<string|null>(null),[isLoading,setIsLoading]=useState(true)
- useEffect(()=>{const t=localStorage.getItem("risksure_access_token"),u=localStorage.getItem("risksure_user");if(t&&u){try{setToken(t);setUser(JSON.parse(u))}catch{localStorage.removeItem("risksure_access_token");localStorage.removeItem("risksure_refresh_token");localStorage.removeItem("risksure_user")}}setIsLoading(false)},[])
+ useEffect(()=>{let cancelled=false
+  const restore=async()=>{
+    const storedToken=localStorage.getItem("risksure_access_token")
+    const storedUser=localStorage.getItem("risksure_user")
+    if(!storedToken||!storedUser){if(!cancelled)setIsLoading(false);return}
+    try{
+      const check=async(token:string)=>apiFetch("/auth/me",{method:"GET",headers:{Authorization:"Bearer "+token}})
+      let response=await check(storedToken)
+      let activeToken=storedToken
+      if(response.status===401){
+        const refreshed=await refreshAccessToken()
+        if(refreshed){activeToken=refreshed;response=await check(refreshed)}
+      }
+      const data=await response.json().catch(()=>null)
+      if(response.ok&&data?.user){
+        if(!cancelled){setToken(activeToken);setUser(data.user);localStorage.setItem("risksure_user",JSON.stringify(data.user))}
+      }else{
+        localStorage.removeItem("risksure_access_token");localStorage.removeItem("risksure_refresh_token");localStorage.removeItem("risksure_user")
+        if(!cancelled){setToken(null);setUser(null)}
+      }
+    }catch{
+      if(!cancelled){setToken(storedToken);try{setUser(JSON.parse(storedUser))}catch{setToken(null);setUser(null)}}
+    }finally{if(!cancelled)setIsLoading(false)}
+  }
+  restore()
+  return()=>{cancelled=true}
+},[])
  const storeSession=(t:string,u:AuthUser,refresh?:string)=>{setToken(t);setUser(u);localStorage.setItem("risksure_access_token",t);if(refresh)localStorage.setItem("risksure_refresh_token",refresh);localStorage.setItem("risksure_user",JSON.stringify(u))}
  const login=async(email:string,password:string)=>{const r=await apiFetch("/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})});const d=await r.json().catch(()=>null);if(!r.ok)throw new Error(d?.error||`Login failed (${r.status})`);if(!d)throw new Error("Backend returned an invalid login response");if(d.totp_setup_required)return{type:"setup" as const,user:d.user,setupToken:d.setup_token};if(d.requires_totp)return{type:"totp" as const,user:d.user,challenge:d.challenge_token};storeSession(d.access_token,d.user,d.refresh_token);return{type:"complete" as const,user:d.user}}
  const verifyTotp=async(challenge:string,code:string)=>{const r=await apiFetch("/auth/login/verify-totp",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${challenge}`},body:JSON.stringify({code})});const d=await r.json().catch(()=>null);if(!r.ok)throw new Error(d?.error||`Authenticator verification failed (${r.status})`);if(!d?.access_token)throw new Error("Backend returned an invalid authentication response");storeSession(d.access_token,d.user,d.refresh_token)}
