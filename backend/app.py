@@ -13,7 +13,7 @@ except ImportError:
 
 import base64
 import hashlib
-from datetime import timedelta
+from datetime import date, datetime, timezone, timedelta
 from functools import wraps
 
 import click
@@ -23,7 +23,7 @@ from flask_limiter import Limiter
 from flask_migrate import Migrate
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
-from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, decode_token, get_jwt, get_jwt_identity, jwt_required
 import json
 import pyotp
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -54,7 +54,9 @@ from models import (
     User,
 )
 
-IS_PRODUCTION = os.getenv("FLASK_ENV", "").strip().lower() == "production"
+RISKSURE_ENV = os.getenv("RISKSURE_ENV", "").strip().lower()
+ALLOW_INSECURE_DEV = os.getenv("RISKSURE_ALLOW_INSECURE_DEV", "").strip().lower() == "true"
+IS_PRODUCTION = RISKSURE_ENV == "production" or os.getenv("VERCEL", "").strip() == "1"
 
 app = Flask(__name__)
 # Vercel/Render/Railway sit behind a proxy; trust its X-Forwarded-* headers so
@@ -65,7 +67,9 @@ _frontend_origins = [
     for origin in os.getenv("FRONTEND_ORIGINS", os.getenv("FRONTEND_ORIGIN", "")).split(",")
     if origin.strip()
 ]
-_allowed_origins = ["https://risk-sure-od3i.vercel.app", *_frontend_origins]
+_allowed_origins = list(_frontend_origins)
+if IS_PRODUCTION and not _allowed_origins:
+    raise RuntimeError("FRONTEND_ORIGINS or FRONTEND_ORIGIN must be configured in production")
 if not IS_PRODUCTION:
     _allowed_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])
 CORS(
@@ -76,8 +80,8 @@ CORS(
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "").strip()
 if not DATABASE_URL:
-    if IS_PRODUCTION:
-        raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured in production")
+    if IS_PRODUCTION or not ALLOW_INSECURE_DEV:
+        raise RuntimeError("DATABASE_URL or NEON_DATABASE_URL must be configured unless RISKSURE_ALLOW_INSECURE_DEV=true")
     DATABASE_URL = "sqlite:///risksure.db"
 
 # Vercel's Python runtime uses a PostgreSQL adapter explicitly configured here.
@@ -96,9 +100,9 @@ if not DATABASE_URL.startswith("sqlite"):
     # pooled connection before use instead of failing the request.
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 300}
 JWT_SECRET = os.getenv("JWT_SECRET_KEY", "").strip()
-if IS_PRODUCTION and not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET_KEY must be configured in production")
 if not JWT_SECRET:
+    if IS_PRODUCTION or not ALLOW_INSECURE_DEV:
+        raise RuntimeError("JWT_SECRET_KEY must be configured unless RISKSURE_ALLOW_INSECURE_DEV=true")
     JWT_SECRET = "local-development-only-change-me"
 app.config["JWT_SECRET_KEY"] = JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_HOURS", "2")))
@@ -129,7 +133,7 @@ limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["300 per minute"],
-    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
+    storage_uri=os.getenv("RATELIMIT_STORAGE_URI") or ("memory://" if not IS_PRODUCTION else None),
 )
 
 # Columns that were too narrow in earlier deployments. Encrypted TOTP secrets
@@ -200,12 +204,7 @@ def _fernet():
                 "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             ) from exc
     if IS_PRODUCTION:
-        # Without a key every login would fail (authenticator setup is mandatory),
-        # so derive one from the JWT secret. Set TOTP_ENCRYPTION_KEY explicitly so
-        # rotating JWT_SECRET_KEY does not invalidate stored authenticator secrets.
-        app.logger.warning("TOTP_ENCRYPTION_KEY is not set; deriving it from JWT_SECRET_KEY")
-        derived = base64.urlsafe_b64encode(hashlib.sha256(("totp:" + JWT_SECRET).encode()).digest())
-        return Fernet(derived)
+        raise RuntimeError("TOTP_ENCRYPTION_KEY must be configured in production")
     return None
 
 def _encrypt_secret(secret):
