@@ -3,13 +3,13 @@ name: Repair frontend lockfile
 on:
   push:
     branches: ["main"]
+    paths: [".lock-repair-needed"]
 
 permissions:
   contents: write
 
 jobs:
   repair:
-    if: hashFiles('.lock-repair-needed') != ''
     runs-on: ubuntu-latest
     defaults:
       run:
