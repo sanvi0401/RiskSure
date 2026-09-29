@@ -1185,20 +1185,30 @@ def billing_list():
 @app.route("/billing",methods=["POST"])
 @roles_required("customer","admin")
 def billing_create():
-    u=current_user_record();d=request.get_json(silent=True) or {}
+    u=current_user_record()
+    d=request.get_json(silent=True) or {}
     try:
-        amount = float(d["amount"])
+        policy_id = int(d["policy_id"])
     except (KeyError, TypeError, ValueError):
-        return jsonify({"error":"Valid amount is required"}),400
-    if not math.isfinite(amount) or amount <= 0:
-        return jsonify({"error":"Amount must be a finite number greater than zero"}),400
-    try:
-        p=customer_for_user(u) if u.role=="customer" else db.session.get(CustomerProfile,int(d.get("customer_id") or 0))
-    except (TypeError, ValueError):
-        return jsonify({"error":"Invalid customer identifier"}),400
+        return jsonify({"error":"A valid policy_id is required"}),400
+    p=customer_for_user(u) if u.role=="customer" else None
+    if u.role=="admin":
+        try:
+            p=db.session.get(CustomerProfile,int(d.get("customer_id") or 0))
+        except (TypeError, ValueError):
+            return jsonify({"error":"Invalid customer identifier"}),400
     if not p:return jsonify({"error":"Customer profile not found"}),404
-    t=BillingTransaction(customer_id=p.id,policy_id=d.get("policy_id"),claim_id=d.get("claim_id"),transaction_type=str(d.get("transaction_type","premium")),amount=amount,status=str(d.get("status","pending")),reference="RS-BILL-"+os.urandom(5).hex().upper(),description=str(d.get("description","")))
-    db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id);db.session.commit();return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference}),201
+    policy=db.session.get(Policy,policy_id)
+    if policy is None or policy.customer_id != p.id:
+        return jsonify({"error":"Policy not found for this customer"}),404
+    # Premiums are calculated by underwriting; never trust a client-supplied
+    # payment amount. Record the policy's authoritative premium instead.
+    amount=float(policy.premium_amount or 0.0)
+    if not math.isfinite(amount) or amount <= 0:
+        return jsonify({"error":"This policy does not have a payable premium"}),400
+    t=BillingTransaction(customer_id=p.id,policy_id=policy.id,transaction_type="premium",amount=amount,status="pending",reference="RS-BILL-"+os.urandom(5).hex().upper(),description="RiskSure premium payment")
+    db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id,{"policy_id":policy.id});db.session.commit()
+    return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference,"amount":amount}),201
 
 @app.route("/customer/portal",methods=["GET"])
 @roles_required("customer")
