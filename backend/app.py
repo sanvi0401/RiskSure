@@ -788,6 +788,7 @@ def underwriting_decision(application_id):
     reason = str(data.get("reason", "")).strip()
     if not reason:
         return jsonify({"error": "A decision reason is required"}), 400
+    if len(reason)>2000:return jsonify({"error":"Decision reason is too long"}),400
     application.decision = decision
     application.decision_reason = reason
     application.review_status = "completed" if decision != "Manual Review" else "manual_review"
