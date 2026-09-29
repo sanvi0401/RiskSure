@@ -21,6 +21,6 @@ dependencies = [
   'xgboost-cpu==3.0.5; sys_platform == "linux"',
   'xgboost==3.0.5; sys_platform != "linux"',
   'numpy>=2.0,<3',
-  'joblib==1.5.2
-redis==6.4.0'
+  'joblib==1.5.2',
+  'redis==6.4.0'
 ]
