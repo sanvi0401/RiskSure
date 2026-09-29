@@ -118,16 +118,6 @@ _PARTIAL_TOKEN_ENDPOINTS = {
 }
 
 
-@jwt.token_verification_loader
-def _restrict_partial_tokens(jwt_header, jwt_data):
-    stage = jwt_data.get("auth_stage")
-    return not stage or request.endpoint in _PARTIAL_TOKEN_ENDPOINTS.get(stage, set())
-
-
-@jwt.token_verification_failed_loader
-def _partial_token_rejected(jwt_header, jwt_data):
-    return jsonify({"error": "Complete authenticator verification to continue"}), 401
-
 db.init_app(app)
 migrate = Migrate(app, db)
 limiter = Limiter(
@@ -148,8 +138,13 @@ _WIDENED_COLUMNS = (
 
 
 def ensure_schema():
-    """Create missing tables and widen legacy columns. Safe to run repeatedly."""
+    """Create missing tables and apply small additive compatibility changes."""
     db.create_all()
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(sql_text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
+    except Exception:
+        pass
     if db.engine.dialect.name == "postgresql":
         with db.engine.begin() as connection:
             for statement in _WIDENED_COLUMNS:
@@ -157,7 +152,7 @@ def ensure_schema():
 
 
 with app.app_context():
-    if os.getenv("AUTO_CREATE_TABLES", "true").strip().lower() == "true":
+    if os.getenv("AUTO_CREATE_TABLES", "false").strip().lower() == "true":
         try:
             ensure_schema()
         except Exception as schema_error:  # noqa: BLE001
