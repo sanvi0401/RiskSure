@@ -1204,11 +1204,122 @@ def unified_case_intelligence(application_id):
     consistency=["High-value claim requires human review."] if any((c.claimed_amount or 0)>100000 for c in claims) else []
     return jsonify({"application":a.to_dict(),"risk":{"model_score":a.risk_score,"final_risk":a.final_risk,"decision":a.decision},"policy":policy_to_dict(p) if p else None,"claims":[claim_to_dict(c) for c in claims],"relationship_signals":signals,"document_consistency":consistency,"human_review_required":bool(consistency or a.review_status in {"manual_review","in_review"})})
 
+@app.route("/graph", methods=["GET"])
+@roles_required("customer", "underwriter", "claims_officer", "provider", "admin")
+def relationship_graph():
+    """Return a role-scoped relationship graph for the frontend."""
+    user = current_user_record()
+    query = Claim.query.order_by(Claim.created_at.desc())
+
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None:
+            return jsonify({"source": "postgres", "nodes": [], "edges": [], "claims": []})
+        query = query.filter_by(customer_id=profile.id)
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        if provider is None:
+            return jsonify({"source": "postgres", "nodes": [], "edges": [], "claims": []})
+        query = query.filter_by(provider_id=provider.id)
+
+    claims = query.limit(100).all()
+    nodes, edges = [], []
+    seen_nodes, seen_edges = set(), set()
+    neo4j_used = False
+
+    def add_node(node_id, node_type, properties=None):
+        if node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            nodes.append({"id": node_id, "type": node_type, "properties": properties or {}})
+
+    def add_edge(source, target, relationship):
+        key = (source, target, relationship)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            edges.append({"source": source, "target": target, "relationship": relationship})
+
+    for claim in claims:
+        payload = {
+            "customer_id": claim.customer_id,
+            "claim_id": claim.id,
+            "claim_number": claim.claim_number,
+            "amount": claim.claimed_amount,
+            "status": claim.status,
+            "provider_id": claim.provider_id,
+        }
+        try:
+            neo4j_upsert_claim(payload)
+            graph = neo4j_claim_graph(claim.id)
+        except Exception:
+            graph = {"nodes": [], "edges": []}
+
+        if graph.get("nodes"):
+            neo4j_used = True
+            for node in graph["nodes"]:
+                add_node(node["id"], node["type"], node.get("properties"))
+            for edge in graph["edges"]:
+                add_edge(edge["source"], edge["target"], edge["relationship"])
+        else:
+            customer_node = f"customer-{claim.customer_id}"
+            claim_node = f"claim-{claim.id}"
+            add_node(customer_node, "customer", {"id": claim.customer_id})
+            add_node(claim_node, "claim", {
+                "id": claim.id,
+                "claim_number": claim.claim_number,
+                "status": claim.status,
+                "amount": claim.claimed_amount,
+            })
+            add_edge(customer_node, claim_node, "submitted")
+            if claim.provider_id:
+                provider_node = f"provider-{claim.provider_id}"
+                add_node(provider_node, "provider", {"id": claim.provider_id})
+                add_edge(provider_node, claim_node, "handles")
+
+    return jsonify({
+        "source": "neo4j" if neo4j_used else "postgres",
+        "neo4j_configured": bool(os.getenv("NEO4J_URI") and os.getenv("NEO4J_USERNAME") and os.getenv("NEO4J_PASSWORD")),
+        "nodes": nodes,
+        "edges": edges,
+        "claims": [claim_to_dict(c) for c in claims],
+    })
+
+
 @app.route("/graph/claim/<int:claim_id>",methods=["GET"])
-@roles_required("claims_officer","underwriter","admin")
+@roles_required("customer","underwriter","claims_officer","provider","admin")
 def claim_graph(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
+    user = current_user_record()
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None or c.customer_id != profile.id:
+            return jsonify({"error":"Insufficient permissions"}),403
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        if provider is None or c.provider_id != provider.id:
+            return jsonify({"error":"Insufficient permissions"}),403
+
+    try:
+        neo4j_upsert_claim({
+            "customer_id": c.customer_id,
+            "claim_id": c.id,
+            "claim_number": c.claim_number,
+            "amount": c.claimed_amount,
+            "status": c.status,
+            "provider_id": c.provider_id,
+        })
+        graph = neo4j_claim_graph(c.id)
+    except Exception:
+        graph = {"nodes": [], "edges": []}
+
+    if graph.get("nodes"):
+        return jsonify({
+            "source": "neo4j",
+            "neo4j_configured": True,
+            "nodes": graph["nodes"],
+            "edges": graph["edges"],
+        })
+
     related=Claim.query.filter((Claim.customer_id==c.customer_id)|(Claim.provider_id==c.provider_id)).all()
     nodes=[];edges=[]
     def add(n,t): 
@@ -1218,7 +1329,12 @@ def claim_graph(claim_id):
         add("claim-"+str(x.id),"claim");edges.append({"source":"customer-"+str(c.customer_id),"target":"claim-"+str(x.id),"relationship":"submitted"})
         if x.provider_id:
             add("provider-"+str(x.provider_id),"provider");edges.append({"source":"provider-"+str(x.provider_id),"target":"claim-"+str(x.id),"relationship":"submitted_to"})
-    return jsonify({"nodes":nodes,"edges":edges})
+    return jsonify({
+        "source": "postgres",
+        "neo4j_configured": bool(os.getenv("NEO4J_URI") and os.getenv("NEO4J_USERNAME") and os.getenv("NEO4J_PASSWORD")),
+        "nodes": nodes,
+        "edges": edges,
+    })
 
 @app.route("/claims/<int:claim_id>/intelligence",methods=["POST"])
 @roles_required("claims_officer","underwriter","admin")
