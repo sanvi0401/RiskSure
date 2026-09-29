@@ -30,6 +30,7 @@ export const API_ENDPOINTS = {
   caseIntelligence: (id: number) => `/cases/${id}/intelligence`,
   claimIntelligence: (id: number) => `/claims/${id}/intelligence`,
   claimGraph: (id: number) => `/graph/claim/${id}`,
+  relationshipGraph: "/graph",
 }
 
 export async function apiFetch(path: string, init: RequestInit = {}) {
