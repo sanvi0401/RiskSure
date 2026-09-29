@@ -55,7 +55,11 @@ export function AuthProvider({children}:{children:ReactNode}){
         if(!cancelled){setToken(null);setUser(null)}
       }
     }catch{
-      if(!cancelled){setToken(storedToken);try{setUser(JSON.parse(storedUser))}catch{setToken(null);setUser(null)}}
+      localStorage.removeItem("risksure_access_token")
+      localStorage.removeItem("risksure_refresh_token")
+      localStorage.removeItem("risksure_user")
+      try{sessionStorage.clear()}catch{}
+      if(!cancelled){setToken(null);setUser(null)}
     }finally{if(!cancelled)setIsLoading(false)}
   }
   restore()
