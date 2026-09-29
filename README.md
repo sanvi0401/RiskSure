@@ -128,3 +128,8 @@ This regenerates `model/insurance_xgb_model.json`, `model/risk_bounds.pkl` and
 | Everyone logged out after a redeploy | `JWT_SECRET_KEY` changed. |
 | Local frontend gets 403 from `localhost:5000` | That port is macOS AirPlay. The backend runs on 5001. |
 | Backend function too large on Vercel | Use the Docker deployment instead. |
+
+
+## Vercel build optimization
+
+The frontend and backend Vercel projects use `frontend` and `backend` as their Root Directories. Each has an `ignoreCommand` so a change outside that project directory skips its build. Keep `NEXT_PUBLIC_API_BASE_URL=/api` for the frontend proxy and set the frontend project's `BACKEND_API_URL` to the deployed backend URL. Configure the backend `FRONTEND_URL` or `FRONTEND_ORIGINS` with the deployed frontend origin so browser requests are allowed.
