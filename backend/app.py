@@ -168,11 +168,6 @@ with app.app_context():
             print(f"Database schema initialisation failed: {schema_error}")
 
 
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"service": "RiskSure backend", "status": "ok", "health": "/health"})
-
-
 @app.errorhandler(400)
 def bad_request(error):
     return jsonify({"error": "Bad request"}), 400
@@ -376,10 +371,9 @@ except Exception as model_error:
     print(f"XGBoost model unavailable; using deterministic fallback: {model_error}")
 
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    status = "LOADED" if model_loaded else "FAILED"
-    return f"Backend is running.<br><br>ML Model Status: {status}"
+    return jsonify({"service":"RiskSure backend","status":"ok","model_loaded":model_loaded,"health":"/health"})
 
 
 @app.route("/health", methods=["GET"])
@@ -467,11 +461,11 @@ def reset_password_with_totp():
     new_password = str(data.get("new_password", ""))
 
     if not email or len(code) != 6 or len(new_password) < 8:
-        return jsonify({"error": "Email, 6-digit authenticator code and a password of at least 8 characters are required"}), 400
+        return jsonify({"error": "Invalid password reset details"}), 400
 
     user = User.query.filter_by(email=email).first()
     if user is None or not user.totp_enabled or not user.totp_secret:
-        return jsonify({"error": "Google Authenticator is not enabled for this account"}), 400
+        return jsonify({"error": "Invalid password reset details"}), 401
 
     if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
@@ -886,11 +880,11 @@ def create_claim():
     if policy.status != "active":
         return jsonify({"error": "Claims can only be submitted against active policies"}), 400
 
-    if not math.isfinite(claimed_amount) or claimed_amount <= 0:
-        return jsonify({"error": "Claimed amount must be a finite number greater than zero"}), 400
+    if not math.isfinite(claimed_amount) or claimed_amount <= 0 or claimed_amount > float(policy.coverage_limit or 0):
+        return jsonify({"error": "Claimed amount must be finite, greater than zero, and within the policy coverage limit"}), 400
 
     customer_id = policy.customer_id
-    provider_id = data.get("provider_id")
+    provider_id = policy.provider_id
 
     if user.role == "customer":
         profile = customer_for_user(user)
@@ -1174,6 +1168,9 @@ def billing_create():
     amount=float(policy.premium_amount or 0.0)
     if not math.isfinite(amount) or amount <= 0:
         return jsonify({"error":"This policy does not have a payable premium"}),400
+    existing=BillingTransaction.query.filter_by(policy_id=policy.id,transaction_type="premium").filter(BillingTransaction.status.in_(["pending","paid"])).first()
+    if existing is not None:
+        return jsonify({"error":"A premium transaction already exists for this policy","reference":existing.reference,"status":existing.status}),409
     t=BillingTransaction(customer_id=p.id,policy_id=policy.id,transaction_type="premium",amount=amount,status="pending",reference="RS-BILL-"+os.urandom(5).hex().upper(),description="RiskSure premium payment")
     db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id,{"policy_id":policy.id});db.session.commit()
     return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference,"amount":amount}),201
