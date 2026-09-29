@@ -23,7 +23,7 @@ from flask_limiter import Limiter
 from flask_migrate import Migrate
 from flask_limiter.util import get_remote_address
 from cryptography.fernet import Fernet, InvalidToken
-from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, decode_token, get_jwt, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
 import json
 import pyotp
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -51,7 +51,6 @@ from models import (
     CustomerProfile,
     Policy,
     Provider,
-    RevokedToken,
     User,
 )
 
@@ -241,11 +240,6 @@ def refresh_token(user):
     return create_refresh_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
 
 
-@jwt.token_in_blocklist_loader
-def token_is_revoked(jwt_header, jwt_data):
-    return RevokedToken.query.filter_by(jti=jwt_data.get("jti")).first() is not None
-
-
 @jwt.token_verification_loader
 def verify_token_stage(jwt_header, jwt_data):
     stage = jwt_data.get("auth_stage")
@@ -404,18 +398,11 @@ def refresh_access_token():
 @app.route("/auth/logout", methods=["POST"])
 @full_auth_required
 def logout():
-    user=current_user_record(); claims=get_jwt()
+    user=current_user_record()
     if user is None:return jsonify({"error":"User not found"}),404
-    if claims.get("jti"):
-        db.session.add(RevokedToken(jti=claims["jti"],user_id=user.id,expires_at=datetime.fromtimestamp(claims["exp"],tz=timezone.utc)))
-    data=request.get_json(silent=True) or {}; refresh=str(data.get("refresh_token","")).strip()
-    if refresh:
-        try:
-            decoded=decode_token(refresh)
-            if decoded.get("type")=="refresh" and decoded.get("sub")==str(user.id):
-                db.session.add(RevokedToken(jti=decoded["jti"],user_id=user.id,expires_at=datetime.fromtimestamp(decoded["exp"],tz=timezone.utc)))
-        except Exception: pass
-    user.token_version+=1; audit(user.id,"logout","user",user.id); db.session.commit()
+    user.token_version += 1
+    audit(user.id,"logout","user",user.id)
+    db.session.commit()
     return jsonify({"message":"Logged out"})
 
 
