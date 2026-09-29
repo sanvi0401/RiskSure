@@ -892,7 +892,7 @@ def create_claim():
     if not math.isfinite(claimed_amount) or claimed_amount <= 0:
         return jsonify({"error": "Claimed amount must be a finite number greater than zero"}), 400
 
-    customer_id = data.get("customer_id")
+    customer_id = policy.customer_id
     provider_id = data.get("provider_id")
 
     if user.role == "customer":
@@ -1167,8 +1167,8 @@ def billing_create():
             return jsonify({"error":"Invalid customer identifier"}),400
     if not p:return jsonify({"error":"Customer profile not found"}),404
     policy=db.session.get(Policy,policy_id)
-    if policy is None or policy.customer_id != p.id:
-        return jsonify({"error":"Policy not found for this customer"}),404
+    if policy is None or policy.customer_id != p.id or policy.status != "active":
+        return jsonify({"error":"Policy is not an active policy for this customer"}),404
     # Premiums are calculated by underwriting; never trust a client-supplied
     # payment amount. Record the policy's authoritative premium instead.
     amount=float(policy.premium_amount or 0.0)
