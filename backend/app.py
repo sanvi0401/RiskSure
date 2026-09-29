@@ -29,6 +29,7 @@ import pyotp
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import text as sql_text
+from sqlalchemy.exc import IntegrityError
 
 # xgboost raises XGBoostError (not ImportError) when its native library cannot
 # load, e.g. libomp missing on macOS. Never let that take the whole API down.
@@ -367,14 +368,18 @@ def refresh_access_token():
 
 
 @app.route("/auth/register", methods=["POST"])
+@limiter.limit("5 per minute")
 def register():
     data = request.get_json(silent=True) or {}
     email = str(data.get("email", "")).strip().lower()
     password = str(data.get("password", ""))
+    full_name = " ".join(str(data.get("full_name", "")).strip().split())
     requested_role = str(data.get("role", "customer")).strip().lower()
 
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
+    if not email or not password or not full_name:
+        return jsonify({"error": "Full name, email and password are required"}), 400
+    if len(full_name) > 160:
+        return jsonify({"error": "Full name must be 160 characters or fewer"}), 400
     if len(password) < 8:
         return jsonify({"error": "Password must be at least 8 characters"}), 400
     if requested_role != "customer":
@@ -385,9 +390,18 @@ def register():
     user = User(email=email, role="customer")
     user.set_password(password)
     db.session.add(user)
-    db.session.flush()
-    audit(user.id, "account_created", "user", user.id)
-    db.session.commit()
+    try:
+        db.session.flush()
+        profile = CustomerProfile(user_id=user.id, full_name=full_name)
+        db.session.add(profile)
+        audit(user.id, "account_created", "user", user.id)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        if User.query.filter_by(email=email).first():
+            return jsonify({"error": "An account with this email already exists"}), 409
+        return jsonify({"error": "Unable to create the account. Please try again."}), 409
+
     return jsonify({"message": "Account created", "user": user.to_dict()}), 201
 
 
