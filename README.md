@@ -67,7 +67,7 @@ Create two Vercel projects from this repository.
   - `FLASK_ENV=production`
   - `DATABASE_URL`: your Neon/Postgres connection string
   - `JWT_SECRET_KEY` and `TOTP_ENCRYPTION_KEY`: use the values generated in `backend/.env`
-  - `AUTO_CREATE_TABLES=true`
+  - `AUTO_CREATE_TABLES=false`
 - Deploy, then open `https://<backend>.vercel.app/health/detailed`. It should show `"database": true` and `"model_loaded": true`.
 
 ### 2. Frontend project
@@ -91,13 +91,12 @@ Then set the frontend's `BACKEND_API_URL` to that service's URL.
 
 ## Database schema
 
-With `AUTO_CREATE_TABLES=true` (default) the backend creates missing tables and
-widens legacy columns on startup. That is idempotent and suits Vercel, which has
-no release step. To manage the schema with migrations instead, set it to `false` and run:
+With `AUTO_CREATE_TABLES=true` the backend can create missing tables and widen
+legacy columns on startup for local/bootstrap use. Production should keep this
+set to `false` and run the Flask-Migrate migration before serving traffic.
 
 ```bash
-flask --app app db upgrade        # fresh database
-flask --app app db stamp 0001_initial && flask --app app db upgrade   # database created earlier by create_all
+flask --app app db upgrade
 ```
 
 ## Tests
