@@ -367,6 +367,15 @@ def refresh_access_token():
     return jsonify({"access_token": auth_token(user)})
 
 
+@app.route("/auth/me", methods=["GET"])
+@jwt_required()
+def auth_me():
+    user = current_user_record()
+    if user is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"user": user.to_dict()})
+
+
 @app.route("/auth/register", methods=["POST"])
 @limiter.limit("5 per minute")
 def register():
