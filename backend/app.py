@@ -654,160 +654,59 @@ def staff_only():
     return jsonify({"message": "Staff access granted", "role": user.role})
 
 
+def calculate_underwriting(data):
+    try:
+        age=float(data.get("age",0)); bmi=float(data.get("bmi",0)); children=float(data.get("children",0))
+        sex=str(data.get("sex","")).strip().lower(); smoker=str(data.get("smoker","")).strip().lower(); region=str(data.get("region","")).strip().lower()
+    except (TypeError,ValueError):
+        raise ValueError("Invalid underwriting input")
+    if not all(math.isfinite(v) for v in (age,bmi,children)): raise ValueError("Underwriting values must be finite")
+    if age<=0 or age>120 or not age.is_integer(): raise ValueError("Age must be a whole number between 1 and 120")
+    if bmi<=0 or bmi>100: raise ValueError("BMI must be between 0 and 100")
+    if children<0 or children>30 or not children.is_integer(): raise ValueError("Children must be a whole number between 0 and 30")
+    sm={"male":1,"female":0}; sn={"yes":1,"no":0,"true":1,"false":0,"1":1,"0":0}; rg={"southwest":0,"southeast":1,"northwest":2,"northeast":3}
+    if sex not in sm: raise ValueError("Sex must be male or female")
+    if smoker not in sn: raise ValueError("Smoker status must be yes or no")
+    if region not in rg: raise ValueError("Invalid region")
+    sv,smv,rv=sm[sex],sn[smoker],rg[region]
+    if model_loaded and model is not None:
+        prediction=float(model.inplace_predict(np.array([[age,sv,bmi,children,smv,rv]],dtype=np.float32))[0]); status="xgboost"
+    else:
+        prediction=3500.0+age*35.0+bmi*80.0+children*250.0+smv*6500.0+rv*250.0; status="deterministic_fallback"
+    risk=max(0.0,min(1.0,(prediction-min_charge)/max(max_charge-min_charge,1.0)))
+    adjustment=(0.20 if smv else 0.0)+(0.05 if bmi>30 else 0.0)+(0.05 if children>2 else 0.0)
+    final=min(1.0,risk+adjustment)
+    decision="Approved" if final<0.5 else "Approved with Conditions" if final<=0.9 else "Manual Review"
+    return {"risk_score":round(risk,4),"rule_adjustment":round(adjustment,4),"final_risk":round(final,4),"decision":decision,"premium":round(5000.0*(1.0+final),2),"model_status":status}
+
 @app.route("/process", methods=["POST"])
 @roles_required("customer", "underwriter", "admin")
 def process():
-    data = request.get_json(silent=True) or {}
-
-    try:
-        age = float(data.get("age", 0))
-        sex_raw = str(data.get("sex", "")).strip().lower()
-        bmi = float(data.get("bmi", 0.0))
-        children = float(data.get("children", 0))
-        smoker_raw = str(data.get("smoker", "")).strip().lower()
-        region_raw = str(data.get("region", "")).strip().lower()
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid underwriting input"}), 400
-
-    if not all(math.isfinite(v) for v in (age, bmi, children)):
-        return jsonify({"error": "Underwriting values must be finite numbers"}), 400
-    if age <= 0 or age > 120 or not age.is_integer():
-        return jsonify({"error": "Age must be a whole number between 1 and 120"}), 400
-    if bmi <= 0 or bmi > 100:
-        return jsonify({"error": "BMI must be between 0 and 100"}), 400
-    if children < 0 or children > 30 or not children.is_integer():
-        return jsonify({"error": "Children must be a whole number between 0 and 30"}), 400
-
-    sex_map = {"male": 1, "female": 0}
-    smoker_map = {"yes": 1, "no": 0, "true": 1, "false": 0, "1": 1, "0": 0}
-    region_map = {"southwest": 0, "southeast": 1, "northwest": 2, "northeast": 3}
-    if sex_raw not in sex_map:
-        return jsonify({"error": "Sex must be male or female"}), 400
-    if smoker_raw not in smoker_map:
-        return jsonify({"error": "Smoker status must be yes or no"}), 400
-    if region_raw not in region_map:
-        return jsonify({"error": "Invalid region"}), 400
-
-    sex = sex_map[sex_raw]
-    smoker = smoker_map[smoker_raw]
-    region = region_map[region_raw]
-
-    if model_loaded and model is not None:
-        features = np.array([[age, sex, bmi, children, smoker, region]], dtype=np.float32)
-        prediction = float(model.inplace_predict(features)[0])
-        model_status = "xgboost"
-    else:
-        prediction = 3500.0 + age * 35.0 + bmi * 80.0 + children * 250.0 + smoker * 6500.0 + region * 250.0
-        model_status = "deterministic_fallback"
-    risk_score = (prediction - min_charge) / max(max_charge - min_charge, 1.0)
-    risk_score = max(0.0, min(1.0, float(risk_score)))
-
-    rule_adjustments = []
-    rule_adjustment = 0.0
-    if smoker == 1:
-        rule_adjustment += 0.20
-        rule_adjustments.append({"rule": "smoker", "adjustment": 0.20, "reason": "Smoking status increases modeled risk."})
-    if bmi > 30:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "high_bmi", "adjustment": 0.05, "reason": "BMI is above 30."})
-    if children > 2:
-        rule_adjustment += 0.05
-        rule_adjustments.append({"rule": "dependents", "adjustment": 0.05, "reason": "More than two dependents are present."})
-
-    final_risk = min(1.0, risk_score + rule_adjustment)
-    if final_risk < 0.5:
-        decision = "Approved"
-    elif final_risk <= 0.9:
-        decision = "Approved with Conditions"
-    else:
-        decision = "Manual Review"
-
-    premium = 5000.0 * (1.0 + final_risk)
-    shap_explanation = []
-    if explainer is not None and model is not None:
-        shap_values = explainer([[age, sex, bmi, children, smoker, region]])
-        contributions = list(shap_values.values[0])
-        for name, contribution in zip(feature_names, contributions):
-            shap_explanation.append({
-                "feature": name,
-                "contribution": round(float(contribution), 4),
-                "direction": "increases" if contribution > 0 else "decreases" if contribution < 0 else "neutral",
-            })
-        shap_explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
-
-    return jsonify({
-        "predicted_charge": prediction,
-        "risk_score": round(risk_score, 4),
-        "rule_adjustment": round(rule_adjustment, 4),
-        "applied_rules": rule_adjustments,
-        "final_risk": round(final_risk, 4),
-        "decision": decision,
-        "premium": round(premium, 2),
-        "model_status": model_status,
-        "explanation": {"method": "SHAP", "features": shap_explanation},
-    })
+    try: result=calculate_underwriting(request.get_json(silent=True) or {})
+    except ValueError as exc: return jsonify({"error":str(exc)}),400
+    return jsonify(result)
 
 
 @app.route("/save", methods=["POST"])
 @roles_required("customer", "underwriter", "admin")
 def save():
-    data = request.get_json(silent=True) or {}
-    user = current_user_record()
-
-    required = ("name", "age", "sex", "bmi", "children", "smoker", "region", "risk_score", "final_risk", "decision", "premium")
-    if any(data.get(key) in (None, "") for key in required):
-        return jsonify({"error": "Complete application data is required"}), 400
-    try:
-        age = int(data["age"])
-        bmi = float(data["bmi"])
-        children = int(data["children"])
-        risk_score = float(data["risk_score"])
-        final_risk = float(data["final_risk"])
-        premium = float(data["premium"])
-        rule_adjustment = float(data.get("rule_adjustment", 0.0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Application numeric fields are invalid"}), 400
-
-    if not all(math.isfinite(v) for v in (bmi, risk_score, final_risk, premium, rule_adjustment)):
-        return jsonify({"error": "Application numeric fields must be finite"}), 400
-    if age <= 0 or age > 120 or children < 0 or age > 120 or bmi <= 0 or bmi > 100 or children > 30 or risk_score < 0 or risk_score > 1 or final_risk < 0 or final_risk > 1 or premium < 0:
-        return jsonify({"error": "Application values are outside supported ranges"}), 400
-
-    customer_id = None
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            profile = CustomerProfile(user_id=user.id, full_name=str(data.get("name", "Unknown")))
-            db.session.add(profile)
-            db.session.flush()
-        customer_id = profile.id
-    elif data.get("customer_id"):
-        try:
-            customer_id = int(data["customer_id"])
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid customer identifier"}), 400
-
-    application = Application(
-        customer_id=customer_id,
-        name=data.get("name", "Unknown"),
-        age=age,
-        sex=data.get("sex"),
-        bmi=bmi,
-        children=children,
-        smoker=data.get("smoker"),
-        region=data.get("region"),
-        risk_score=risk_score,
-        rule_adjustment=rule_adjustment,
-        final_risk=final_risk,
-        decision=str(data.get("decision", "Unknown")),
-        premium=premium,
-    )
-
-    db.session.add(application)
-    db.session.flush()
-    audit(user.id, "application_created", "application", application.id)
-    db.session.commit()
-    return jsonify({"message": "Application saved successfully", "application": application.to_dict()})
+    data=request.get_json(silent=True) or {}; user=current_user_record()
+    if any(data.get(k) in (None,"") for k in ("name","age","sex","bmi","children","smoker","region")):
+        return jsonify({"error":"Complete application data is required"}),400
+    try: result=calculate_underwriting(data)
+    except ValueError as exc: return jsonify({"error":str(exc)}),400
+    if user.role=="customer":
+        profile=customer_for_user(user)
+        if profile is None:return jsonify({"error":"Customer profile not found"}),404
+        customer_id=profile.id; name=profile.full_name
+    else:
+        try: customer_id=int(data.get("customer_id"))
+        except (TypeError,ValueError): return jsonify({"error":"A valid customer_id is required"}),400
+        if db.session.get(CustomerProfile,customer_id) is None:return jsonify({"error":"Customer profile not found"}),404
+        name=" ".join(str(data.get("name","")).split())[:120] or "Unknown"
+    a=Application(customer_id=customer_id,name=name,age=int(float(data["age"])),sex=str(data["sex"]).strip().lower(),bmi=float(data["bmi"]),children=int(float(data["children"])),smoker=str(data["smoker"]).strip().lower(),region=str(data["region"]).strip().lower(),risk_score=result["risk_score"],rule_adjustment=result["rule_adjustment"],final_risk=result["final_risk"],decision=result["decision"],premium=result["premium"],review_status="pending")
+    db.session.add(a);db.session.flush();audit(user.id,"application_created","application",a.id,{"model_status":result["model_status"]});db.session.commit()
+    return jsonify({"message":"Application saved successfully","application":a.to_dict()})
 
 
 @app.route("/applications", methods=["GET"])
