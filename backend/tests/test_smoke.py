@@ -15,6 +15,8 @@ APPLICANT = {"age": 45, "sex": "male", "bmi": 33, "children": 2, "smoker": "no",
 
 @pytest.fixture(scope="module")
 def client():
+    with backend.app.app_context():
+        backend.ensure_schema()
     return backend.app.test_client()
 
 
@@ -73,6 +75,9 @@ def test_underwriting_flow(client, session):
         k: body[k] for k in ("risk_score", "final_risk", "decision", "premium", "rule_adjustment")}})
     assert saved.status_code == 200
     assert len(client.get("/applications", headers=headers).json) >= 1
+    tampered = client.post("/save", headers=headers, json={"name":"Tampered", **APPLICANT, "risk_score":0,"final_risk":0,"decision":"Approved","premium":1,"rule_adjustment":0})
+    assert tampered.status_code == 200
+    assert tampered.json["application"]["decision"] != "Approved" or tampered.json["application"]["premium"] != 1
 
 
 @pytest.mark.skipif(not backend.model_loaded, reason="xgboost native library unavailable")
