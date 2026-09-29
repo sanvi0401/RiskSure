@@ -168,11 +168,6 @@ with app.app_context():
             print(f"Database schema initialisation failed: {schema_error}")
 
 
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"service": "RiskSure backend", "status": "ok", "health": "/health"})
-
-
 @app.errorhandler(400)
 def bad_request(error):
     return jsonify({"error": "Bad request"}), 400
@@ -376,10 +371,9 @@ except Exception as model_error:
     print(f"XGBoost model unavailable; using deterministic fallback: {model_error}")
 
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    status = "LOADED" if model_loaded else "FAILED"
-    return f"Backend is running.<br><br>ML Model Status: {status}"
+    return jsonify({"service":"RiskSure backend","status":"ok","model_loaded":model_loaded,"health":"/health"})
 
 
 @app.route("/health", methods=["GET"])
@@ -467,11 +461,11 @@ def reset_password_with_totp():
     new_password = str(data.get("new_password", ""))
 
     if not email or len(code) != 6 or len(new_password) < 8:
-        return jsonify({"error": "Email, 6-digit authenticator code and a password of at least 8 characters are required"}), 400
+        return jsonify({"error": "Invalid password reset details"}), 400
 
     user = User.query.filter_by(email=email).first()
     if user is None or not user.totp_enabled or not user.totp_secret:
-        return jsonify({"error": "Google Authenticator is not enabled for this account"}), 400
+        return jsonify({"error": "Invalid password reset details"}), 401
 
     if not pyotp.TOTP(_decrypt_secret(user.totp_secret)).verify(code, valid_window=1):
         return jsonify({"error": "Invalid or expired Google Authenticator code"}), 401
@@ -649,7 +643,7 @@ def disable_totp():
 
 
 @app.route("/auth/me", methods=["GET"])
-@jwt_required()
+@full_auth_required
 def current_user():
     user = current_user_record()
     if user is None:
@@ -794,6 +788,7 @@ def underwriting_decision(application_id):
     reason = str(data.get("reason", "")).strip()
     if not reason:
         return jsonify({"error": "A decision reason is required"}), 400
+    if len(reason)>2000:return jsonify({"error":"Decision reason is too long"}),400
     application.decision = decision
     application.decision_reason = reason
     application.review_status = "completed" if decision != "Manual Review" else "manual_review"
@@ -886,11 +881,11 @@ def create_claim():
     if policy.status != "active":
         return jsonify({"error": "Claims can only be submitted against active policies"}), 400
 
-    if not math.isfinite(claimed_amount) or claimed_amount <= 0:
-        return jsonify({"error": "Claimed amount must be a finite number greater than zero"}), 400
+    if not math.isfinite(claimed_amount) or claimed_amount <= 0 or claimed_amount > float(policy.coverage_limit or 0):
+        return jsonify({"error": "Claimed amount must be finite, greater than zero, and within the policy coverage limit"}), 400
 
     customer_id = policy.customer_id
-    provider_id = data.get("provider_id")
+    provider_id = policy.provider_id
 
     if user.role == "customer":
         profile = customer_for_user(user)
@@ -915,7 +910,7 @@ def create_claim():
         provider_id=int(provider_id) if provider_id else policy.provider_id,
         claimed_amount=claimed_amount,
         status="submitted",
-        description=str(data.get("description", "")),
+        description=str(data.get("description", "")).strip()[:5000],
     )
     db.session.add(claim)
     db.session.flush()
@@ -1032,6 +1027,7 @@ def admin_update_role(user_id):
         return jsonify({"error": "An admin cannot remove their own admin role"}), 400
 
     user.role = role
+    user.token_version += 1
     audit(admin.id, "user_role_changed", "user", user.id, {"role": role})
     db.session.commit()
     return jsonify({"message": "Role updated", "user": user.to_dict()})
@@ -1087,6 +1083,7 @@ def policy_document(policy_id):
     if not p:return jsonify({"error":"Policy not found"}),404
     text=str((request.get_json(silent=True) or {}).get("document_text","")).strip()
     if not text:return jsonify({"error":"document_text is required"}),400
+    if len(text)>50000:return jsonify({"error":"document_text is too long"}),400
     p.terms_document=text;audit(current_user_record().id,"policy_document_indexed","policy",p.id,{"characters":len(text)});db.session.commit()
     return jsonify({"message":"Policy document indexed","policy":policy_to_dict(p)})
 
@@ -1104,7 +1101,7 @@ def policy_intelligence(policy_id):
         provider=provider_for_user(u)
         if provider is None or p.provider_id != provider.id:
             return jsonify({"error":"Insufficient permissions"}),403
-    d=request.get_json(silent=True) or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
+    d=request.get_json(silent=True) or {};text=str(p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
     try:
@@ -1174,6 +1171,9 @@ def billing_create():
     amount=float(policy.premium_amount or 0.0)
     if not math.isfinite(amount) or amount <= 0:
         return jsonify({"error":"This policy does not have a payable premium"}),400
+    existing=BillingTransaction.query.filter_by(policy_id=policy.id,transaction_type="premium").filter(BillingTransaction.status.in_(["pending","paid"])).first()
+    if existing is not None:
+        return jsonify({"error":"A premium transaction already exists for this policy","reference":existing.reference,"status":existing.status}),409
     t=BillingTransaction(customer_id=p.id,policy_id=policy.id,transaction_type="premium",amount=amount,status="pending",reference="RS-BILL-"+os.urandom(5).hex().upper(),description="RiskSure premium payment")
     db.session.add(t);db.session.flush();audit(u.id,"billing_transaction_created","billing_transaction",t.id,{"policy_id":policy.id});db.session.commit()
     return jsonify({"message":"Billing transaction created","id":t.id,"reference":t.reference,"amount":amount}),201
@@ -1230,8 +1230,19 @@ def claim_image_intelligence(claim_id):
     if not c:return jsonify({"error":"Claim not found"}),404
     d=request.get_json(silent=True) or {}
     path=str(d.get("image_path","")).strip()
-    if not path:return jsonify({"error":"image_path is required"}),400
-    return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(path)})
+    upload_root=os.path.realpath(os.getenv("CLAIM_IMAGE_DIR","")).strip()
+    if not upload_root or not path:
+        return jsonify({"error":"A configured claim image upload directory and image_path are required"}),400
+    if os.path.splitext(path)[1].lower() not in {".jpg",".jpeg",".png",".webp"}:
+        return jsonify({"error":"Unsupported claim image type"}),400
+    resolved=os.path.realpath(path)
+    if not (resolved==upload_root or resolved.startswith(upload_root+os.sep)):
+        return jsonify({"error":"Image path is outside the configured claim image directory"}),403
+    if not os.path.isfile(resolved):
+        return jsonify({"error":"Claim image not found"}),404
+    if os.path.getsize(resolved) > 10 * 1024 * 1024:
+        return jsonify({"error":"Claim image exceeds the 10 MB limit"}),400
+    return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(resolved)})
 
 @app.route("/cases/<int:application_id>/review",methods=["GET"])
 @roles_required("underwriter","claims_officer","admin")
