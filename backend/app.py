@@ -1098,7 +1098,7 @@ def policy_intelligence(policy_id):
         provider=provider_for_user(u)
         if provider is None or p.provider_id != provider.id:
             return jsonify({"error":"Insufficient permissions"}),403
-    d=request.get_json(silent=True) or {};text=str(d.get("document_text") or p.terms_document or "").strip();q=str(d.get("question") or "").strip()
+    d=request.get_json(silent=True) or {};text=str(p.terms_document or "").strip();q=str(d.get("question") or "").strip()
     if not text:return jsonify({"error":"No policy document text available"}),400
     parts=[v.strip() for v in text.replace("\r","").split("\n") if v.strip()];words={w.lower() for w in q.split() if len(w)>2};hits=sorted(parts,key=lambda v:sum(w in v.lower() for w in words),reverse=True)[:3]
     try:
@@ -1227,8 +1227,15 @@ def claim_image_intelligence(claim_id):
     if not c:return jsonify({"error":"Claim not found"}),404
     d=request.get_json(silent=True) or {}
     path=str(d.get("image_path","")).strip()
-    if not path:return jsonify({"error":"image_path is required"}),400
-    return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(path)})
+    upload_root=os.path.realpath(os.getenv("CLAIM_IMAGE_DIR","")).strip()
+    if not upload_root or not path:
+        return jsonify({"error":"A configured claim image upload directory and image_path are required"}),400
+    resolved=os.path.realpath(path)
+    if not (resolved==upload_root or resolved.startswith(upload_root+os.sep)):
+        return jsonify({"error":"Image path is outside the configured claim image directory"}),403
+    if not os.path.isfile(resolved):
+        return jsonify({"error":"Claim image not found"}),404
+    return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(resolved)})
 
 @app.route("/cases/<int:application_id>/review",methods=["GET"])
 @roles_required("underwriter","claims_officer","admin")
