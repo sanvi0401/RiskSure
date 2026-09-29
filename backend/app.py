@@ -910,7 +910,7 @@ def create_claim():
         provider_id=int(provider_id) if provider_id else policy.provider_id,
         claimed_amount=claimed_amount,
         status="submitted",
-        description=str(data.get("description", "")),
+        description=str(data.get("description", "")).strip()[:5000],
     )
     db.session.add(claim)
     db.session.flush()
@@ -1083,6 +1083,7 @@ def policy_document(policy_id):
     if not p:return jsonify({"error":"Policy not found"}),404
     text=str((request.get_json(silent=True) or {}).get("document_text","")).strip()
     if not text:return jsonify({"error":"document_text is required"}),400
+    if len(text)>50000:return jsonify({"error":"document_text is too long"}),400
     p.terms_document=text;audit(current_user_record().id,"policy_document_indexed","policy",p.id,{"characters":len(text)});db.session.commit()
     return jsonify({"message":"Policy document indexed","policy":policy_to_dict(p)})
 
@@ -1232,11 +1233,15 @@ def claim_image_intelligence(claim_id):
     upload_root=os.path.realpath(os.getenv("CLAIM_IMAGE_DIR","")).strip()
     if not upload_root or not path:
         return jsonify({"error":"A configured claim image upload directory and image_path are required"}),400
+    if os.path.splitext(path)[1].lower() not in {".jpg",".jpeg",".png",".webp"}:
+        return jsonify({"error":"Unsupported claim image type"}),400
     resolved=os.path.realpath(path)
     if not (resolved==upload_root or resolved.startswith(upload_root+os.sep)):
         return jsonify({"error":"Image path is outside the configured claim image directory"}),403
     if not os.path.isfile(resolved):
         return jsonify({"error":"Claim image not found"}),404
+    if os.path.getsize(resolved) > 10 * 1024 * 1024:
+        return jsonify({"error":"Claim image exceeds the 10 MB limit"}),400
     return jsonify({"claim":claim_to_dict(c),"image_analysis":analyze_claim_image(resolved)})
 
 @app.route("/cases/<int:application_id>/review",methods=["GET"])
