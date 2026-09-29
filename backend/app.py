@@ -119,6 +119,16 @@ _PARTIAL_TOKEN_ENDPOINTS = {
 
 db.init_app(app)
 migrate = Migrate(app, db)
+
+def ensure_token_version_column():
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(sql_text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
+    except Exception:
+        pass
+
+with app.app_context():
+    ensure_token_version_column()
 RATE_LIMIT_STORAGE = os.getenv("RATELIMIT_STORAGE_URI", "").strip()
 if IS_PRODUCTION and not RATE_LIMIT_STORAGE:
     raise RuntimeError("RATELIMIT_STORAGE_URI must be configured in production")
@@ -142,11 +152,6 @@ _WIDENED_COLUMNS = (
 def ensure_schema():
     """Create missing tables and apply small additive compatibility changes."""
     db.create_all()
-    try:
-        with db.engine.begin() as connection:
-            connection.execute(sql_text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
-    except Exception:
-        pass
     if db.engine.dialect.name == "postgresql":
         with db.engine.begin() as connection:
             for statement in _WIDENED_COLUMNS:
