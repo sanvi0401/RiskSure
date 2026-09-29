@@ -120,11 +120,14 @@ _PARTIAL_TOKEN_ENDPOINTS = {
 
 db.init_app(app)
 migrate = Migrate(app, db)
+RATE_LIMIT_STORAGE = os.getenv("RATELIMIT_STORAGE_URI", "").strip()
+if IS_PRODUCTION and not RATE_LIMIT_STORAGE:
+    raise RuntimeError("RATELIMIT_STORAGE_URI must be configured in production")
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["300 per minute"],
-    storage_uri=os.getenv("RATELIMIT_STORAGE_URI") or ("memory://" if not IS_PRODUCTION else None),
+    storage_uri=RATE_LIMIT_STORAGE or "memory://",
 )
 
 # Columns that were too narrow in earlier deployments. Encrypted TOTP secrets
