@@ -84,6 +84,12 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
       localStorage.removeItem("risksure_access_token")
       localStorage.removeItem("risksure_refresh_token")
       localStorage.removeItem("risksure_user")
+      try { sessionStorage.clear() } catch {}
+      if (typeof window !== "undefined") {
+        const current = window.location.pathname + window.location.search
+        const safeNext = current.startsWith("/") && !current.startsWith("//") && !current.includes("\\") ? current : "/dashboard"
+        window.location.assign("/login?session_expired=1&next=" + encodeURIComponent(safeNext))
+      }
     }
 
     return response
