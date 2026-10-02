@@ -16,7 +16,7 @@ psycopg[binary]==3.2.10
 # Underwriting model runtime. On Linux (Vercel, Docker) use the CPU-only wheel:
 # the regular xgboost wheel pulls in ~300 MB of NVIDIA NCCL and exceeds
 # serverless bundle limits. Both packages provide the same `xgboost` module.
-xgboost-cpu==3.0.5; sys_platform == "linux"
+xgboost-cpu==3.4.1; sys_platform == "linux"
 xgboost==3.0.5; sys_platform != "linux"
 numpy>=2.0,<3
 joblib==1.5.2
