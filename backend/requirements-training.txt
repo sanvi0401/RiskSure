@@ -3,5 +3,5 @@
 # intentionally uses the deterministic fallback model.
 numpy==2.3.3
 scikit-learn==1.7.2
-xgboost==3.0.5
+xgboost==3.4.1
 joblib==1.5.2
