@@ -18,6 +18,6 @@ psycopg[binary]==3.2.10
 # serverless bundle limits. Both packages provide the same `xgboost` module.
 xgboost-cpu==3.0.5; sys_platform == "linux"
 xgboost==3.0.5; sys_platform != "linux"
-numpy>=2.0,<3
+numpy>=2.5.3,<3
 joblib==1.5.2
 redis==6.4.0
