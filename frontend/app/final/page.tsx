@@ -44,20 +44,20 @@ export default function FinalPage() {
         setIsSaved(true)
         setTimeout(() => {
           resetApplication()
-          router.push("/dashboard")
+          router.push("/underwriter")
         }, 1500)
       } else {
         setIsSaved(true)
         setTimeout(() => {
           resetApplication()
-          router.push("/dashboard")
+          router.push("/underwriter")
         }, 1500)
       }
     } catch {
       setIsSaved(true)
       setTimeout(() => {
         resetApplication()
-        router.push("/dashboard")
+        router.push("/underwriter")
       }, 1500)
     }
   }

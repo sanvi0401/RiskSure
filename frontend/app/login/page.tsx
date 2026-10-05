@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ArrowRight, Loader2, Shield, Sparkles, Waves } from "lucide-react"
-import { useAuth } from "@/context/auth-context"
+import { getDashboardRoute, useAuth } from "@/context/auth-context"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -28,8 +28,8 @@ export default function LoginPage() {
     }
 
     try {
-      await login(email, password)
-      router.push("/dashboard")
+      const authenticatedUser = await login(email, password)
+      router.push(getDashboardRoute(authenticatedUser.role))
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Unable to sign in")
     } finally {

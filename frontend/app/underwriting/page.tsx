@@ -150,10 +150,10 @@ export default function UnderwritingPage() {
               </Button>
             ) : (
               <Button
-                onClick={() => router.push("/dashboard")}
+                onClick={() => router.push("/underwriter")}
                 className="h-11 rounded-2xl bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
-                Return to Dashboard
+                Return to Underwriter Dashboard
               </Button>
             )}
           </form>

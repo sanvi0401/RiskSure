@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { IBM_Plex_Mono, Sora } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
+import { AuthProvider } from '@/context/auth-context'
 import { ApplicationProvider } from '@/context/application-context'
 import './globals.css'
 

@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react"
 import { API_BASE_URL } from "@/lib/api"
 
-export type UserRole = "customer" | "underwriter" | "claims_officer" | "provider" | "admin"
+export type UserRole = "customer" | "underwriter" | "admin"
 
 export interface AuthUser {
   id: number
@@ -12,11 +12,24 @@ export interface AuthUser {
   created_at?: string | null
 }
 
+export function getDashboardRoute(role: UserRole): string {
+  switch (role) {
+    case "customer":
+      return "/customer"
+    case "underwriter":
+      return "/underwriter"
+    case "admin":
+      return "/admin"
+    default:
+      return "/login"
+  }
+}
+
 interface AuthContextType {
   user: AuthUser | null
   token: string | null
   isLoading: boolean
-  login: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<AuthUser>
   logout: () => void
   hasRole: (roles: UserRole | UserRole[]) => boolean
 }
@@ -43,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(false)
   }, [])
 
-  const login = async (email: string, password: string) => {
+  const login = async (email: string, password: string): Promise<AuthUser> => {
     const response = await fetch(`${API_BASE_URL}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -52,13 +65,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || "Login failed")
 
+    const userData: AuthUser = data.user
     setToken(data.access_token)
-    setUser(data.user)
+    setUser(userData)
     window.localStorage.setItem("risksure_access_token", data.access_token)
-    window.localStorage.setItem("risksure_user", JSON.stringify(data.user))
+    window.localStorage.setItem("risksure_user", JSON.stringify(userData))
+    return userData
   }
 
-  const hasRole = (roles: UserRole | UserRole[]) => {\n    if (!user) return false\n    const allowed = Array.isArray(roles) ? roles : [roles]\n    return allowed.includes(user.role)\n  }\n\n  const logout = () => {
+  const hasRole = (roles: UserRole | UserRole[]) => {
+    if (!user) return false
+    const allowed = Array.isArray(roles) ? roles : [roles]
+    return allowed.includes(user.role)
+  }
+
+  const logout = () => {
     setToken(null)
     setUser(null)
     window.localStorage.removeItem("risksure_access_token")

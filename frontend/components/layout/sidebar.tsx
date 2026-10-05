@@ -10,17 +10,15 @@ import {
 } from "lucide-react"
 
 const navItems: { href: string; label: string; icon: typeof LayoutDashboard; roles: UserRole[] }[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["customer","underwriter","claims_officer","provider","admin"] },
+  { href: "/customer", label: "Customer Dashboard", icon: LayoutDashboard, roles: ["customer"] },
+  { href: "/underwriter", label: "Underwriter Dashboard", icon: LayoutDashboard, roles: ["underwriter"] },
+  { href: "/admin", label: "Admin Centre", icon: Users, roles: ["admin"] },
   { href: "/new-application", label: "New Application", icon: FilePlus, roles: ["customer","underwriter","admin"] },
   { href: "/risk", label: "Risk Scoring", icon: Activity, roles: ["underwriter","admin"] },
   { href: "/underwriting", label: "Underwriting", icon: Scale, roles: ["underwriter","admin"] },
-  { href: "/claims", label: "Claims Centre", icon: ClipboardList, roles: ["claims_officer","admin"] },
-  { href: "/provider", label: "Provider Portal", icon: Network, roles: ["provider","admin"] },
   { href: "/premium", label: "Billing Centre", icon: Calculator, roles: ["customer","underwriter","admin"] },
-  { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter","claims_officer","admin"] },
-  { href: "/fraud", label: "Fraud Investigation", icon: Network, roles: ["underwriter","claims_officer","admin"] },
-  { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","claims_officer","admin"] },
-  { href: "/admin", label: "Admin Centre", icon: Users, roles: ["admin"] },
+  { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter","admin"] },
+  { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","admin"] },
 ]
 
 export function Sidebar() {
