@@ -173,8 +173,11 @@ function UnderwriterDashboard() {
                 <div className="rounded-xl bg-white/5 p-3">BMI<br /><b>{selected.bmi ?? "Not recorded"}</b></div>
                 <div className="rounded-xl bg-white/5 p-3">Smoker<br /><b>{selected.smoker ?? "Not recorded"}</b></div>
               </div>
-              <Link className="mt-4 block text-center text-sm text-primary hover:underline" href={`/case-intelligence?id=${selected.id}`}>
-                Open evidence review
+              <Link className="mt-4 block text-center text-sm text-primary hover:underline" href={`/underwriter/applications/${selected.id}`}>
+                Open application risk investigation
+              </Link>
+              <Link className="mt-2 block text-center text-sm text-primary hover:underline" href={`/case-intelligence?id=${selected.id}`}>
+                Open full case evidence
               </Link>
               <Link className="mt-2 block text-center text-sm text-primary hover:underline" href={`/relationship-graph?application_id=${selected.id}`}>
                 Open application relationship graph

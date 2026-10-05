@@ -22,6 +22,7 @@ const navItems: { href: string; label: string; icon: typeof LayoutDashboard; rol
   { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","claims_officer","admin"] },
   { href: "/relationship-graph", label: "Relationship Graph", icon: Network, roles: ["underwriter","claims_officer","provider","admin"] },
   { href: "/admin", label: "Admin Centre", icon: Users, roles: ["admin"] },
+  { href: "/admin/graph", label: "System Graph", icon: Network, roles: ["admin"] },
 ]
 
 export function Sidebar() {
@@ -40,7 +41,7 @@ export function Sidebar() {
       </div>
       <nav className="mt-5 flex flex-col gap-2">
         {navItems.filter(item => hasRole(item.roles)).map((item) => {
-          const isActive = pathname === item.href
+          const isActive = pathname === item.href || (item.href !== "/admin" && pathname.startsWith(`${item.href}/`))
           return <Link key={item.href} href={item.href} className={cn("group flex items-center justify-between rounded-[1.2rem] border px-4 py-3.5 text-sm font-medium transition-all duration-200", isActive ? "border-primary/25 bg-primary/12 text-foreground" : "border-transparent bg-white/2 text-muted-foreground hover:border-white/10 hover:bg-white/6 hover:text-foreground")}>
             <span className="flex items-center gap-3"><span className={cn("flex h-10 w-10 items-center justify-center rounded-2xl", isActive ? "bg-primary text-primary-foreground" : "bg-white/6 text-muted-foreground")}><item.icon className="h-5 w-5" /></span><span>{item.label}</span></span>
             <ArrowUpRight className="h-4 w-4" />

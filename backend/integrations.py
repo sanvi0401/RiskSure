@@ -4,9 +4,12 @@ These integrations are configuration-driven and never prevent the Flask app
 from starting when an optional service or package is unavailable.
 """
 import os
+import logging
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def _configured(*names: str) -> bool:
@@ -40,7 +43,11 @@ def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
     MERGE (c:Customer {id: $customer_id})
     MERGE (cl:Claim {id: $claim_id})
     SET cl.claim_number=$claim_number, cl.amount=$amount, cl.status=$status
-    MERGE (c)-[:SUBMITTED]->(cl)
+    MERGE (c)-[:HAS_CLAIM]->(cl)
+    FOREACH (_ IN CASE WHEN $policy_id IS NULL THEN [] ELSE [1] END |
+      MERGE (p:Policy {id: $policy_id})
+      MERGE (p)-[:COVERS]->(cl)
+    )
     WITH cl
     FOREACH (_ IN CASE WHEN $provider_id IS NULL THEN [] ELSE [1] END |
       MERGE (p:Provider {id: $provider_id})
@@ -49,32 +56,37 @@ def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
     """
     try:
         with _neo4j_session(driver) as session:
-            session.run(query, **claim).consume()
+            parameters = {"policy_id": None, **claim}
+            session.run(query, **parameters).consume()
         return True
     except Exception:
+        logger.warning("Neo4j claim synchronization failed")
         return False
     finally:
         driver.close()
 
 
-def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
+def neo4j_claim_graph(claim_id: int, allowed_claim_ids: list[int] | None = None) -> dict[str, list]:
     driver = neo4j_driver()
     if driver is None:
         return {"nodes": [], "edges": []}
     query = """
     MATCH (c:Claim {id: $claim_id})
-    OPTIONAL MATCH (customer:Customer)-[:SUBMITTED]->(c)
+    OPTIONAL MATCH (customer:Customer)-[:HAS_CLAIM|SUBMITTED]->(c)
     OPTIONAL MATCH (provider:Provider)-[:HANDLES]->(c)
-    OPTIONAL MATCH (customer)-[:SUBMITTED]->(related:Claim)
+    OPTIONAL MATCH (customer)-[:HAS_CLAIM|SUBMITTED]->(related:Claim)
+    WHERE related.id IN $allowed_claim_ids
     RETURN c, customer, provider, related
     """
     nodes: list[dict] = []
     edges: list[dict] = []
     seen_nodes: set[str] = set()
     seen_edges: set[tuple[str, str, str]] = set()
+    permitted_claim_ids = set(allowed_claim_ids or [])
+    permitted_claim_ids.add(claim_id)
     try:
         with _neo4j_session(driver) as session:
-            for row in session.run(query, claim_id=claim_id):
+            for row in session.run(query, claim_id=claim_id, allowed_claim_ids=list(permitted_claim_ids)):
                 for node, kind in (
                     (row["c"], "claim"),
                     (row["customer"], "customer"),
@@ -107,6 +119,374 @@ def neo4j_claim_graph(claim_id: int) -> dict[str, list]:
                         edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
         return {"nodes": nodes, "edges": edges}
     except Exception:
+        logger.warning("Neo4j claim graph read failed")
+        return {"nodes": [], "edges": []}
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_application(application: dict[str, Any]) -> bool:
+    """Synchronize persisted application facts without replacing PostgreSQL as source of truth."""
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    query = """
+    MERGE (a:Application {id: $application_id})
+    SET a.name=$name, a.review_status=$review_status, a.risk_score=$risk_score,
+        a.final_risk=$final_risk, a.premium=$premium, a.decision=$decision,
+        a.decision_reason=$decision_reason, a.created_at=$created_at,
+        a.customer_id=$customer_id, a.assigned_underwriter_id=$underwriter_id
+    FOREACH (_ IN CASE WHEN $customer_id IS NULL THEN [] ELSE [1] END |
+      MERGE (c:Customer {id: $customer_id})
+      MERGE (c)-[:SUBMITTED]->(a)
+    )
+    FOREACH (_ IN CASE WHEN $underwriter_id IS NULL THEN [] ELSE [1] END |
+      MERGE (u:Underwriter {id: $underwriter_id})
+      FOREACH (__ IN CASE WHEN $reviewed_at IS NULL THEN [] ELSE [1] END |
+        MERGE (u)-[:REVIEWED]->(a)
+      )
+    )
+    FOREACH (_ IN CASE WHEN $decision IS NULL OR $decision = 'Unknown' THEN [] ELSE [1] END |
+      MERGE (d:Decision {application_id: $application_id})
+      SET d.value=$decision, d.reason=$decision_reason, d.reviewed_at=$reviewed_at
+      MERGE (a)-[:RESULTED_IN]->(d)
+    )
+    FOREACH (_ IN CASE WHEN $region IS NULL THEN [] ELSE [1] END |
+      MERGE (l:Location {region: $region})
+      MERGE (a)-[:ASSOCIATED_WITH]->(l)
+    )
+    """
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(query, **application).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j application synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_risk_factors(application_id: int, factors: list[dict[str, Any]]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    query = """
+    MATCH (a:Application {id: $application_id})
+    UNWIND $factors AS factor
+    MERGE (rf:RiskFactor {key: factor.key})
+    SET rf.name=factor.name, rf.value=factor.value
+    MERGE (a)-[:HAS_RISK_FACTOR]->(rf)
+    """
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(query, application_id=application_id, factors=factors).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j risk-factor synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_link_application_policy(application_id: int, policy: dict[str, Any]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    query = """
+    MATCH (a:Application {id: $application_id})
+    MERGE (p:Policy {id: $policy_id})
+    SET p.policy_number=$policy_number, p.status=$status, p.policy_type=$policy_type
+    MERGE (a)-[:HAS_POLICY]->(p)
+    """
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(query, application_id=application_id, **policy).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j policy synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_policy(policy: dict[str, Any]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    query = """
+    MERGE (c:Customer {id: $customer_id})
+    MERGE (p:Policy {id: $policy_id})
+    SET p.policy_number=$policy_number, p.status=$status, p.policy_type=$policy_type
+    MERGE (c)-[:HAS_POLICY]->(p)
+    """
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(query, **policy).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j policy synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_customer(customer: dict[str, Any]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    query = """
+    MERGE (c:Customer {id: $customer_id})
+    SET c.name=$name, c.city=$city, c.state=$state
+    """
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(query, **customer).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j customer synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_underwriter(underwriter: dict[str, Any]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(
+                "MERGE (u:Underwriter {id: $id}) SET u.email=$email",
+                **underwriter,
+            ).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j underwriter synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_upsert_provider(provider: dict[str, Any]) -> bool:
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    try:
+        with _neo4j_session(driver) as session:
+            session.run(
+                "MERGE (p:Provider {id: $id}) SET p.name=$name, p.provider_type=$provider_type, p.status=$status",
+                **provider,
+            ).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j provider synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def neo4j_sync_system_projection(projection: dict[str, list[dict[str, Any]]]) -> bool:
+    """Batch-upsert PostgreSQL facts using fixed Cypher and stable entity keys."""
+    driver = neo4j_driver()
+    if driver is None:
+        return False
+    statements = (
+        (
+            "UNWIND $items AS item MERGE (c:Customer {id:item.id}) SET c.name=item.name, c.city=item.city, c.state=item.state",
+            "customers",
+        ),
+        (
+            "UNWIND $items AS item MERGE (u:Underwriter {id:item.id}) SET u.email=item.email",
+            "underwriters",
+        ),
+        (
+            "UNWIND $items AS item MERGE (p:Provider {id:item.id}) SET p.name=item.name, p.provider_type=item.provider_type, p.status=item.status",
+            "providers",
+        ),
+        (
+            """
+            UNWIND $items AS item
+            MERGE (a:Application {id:item.application_id})
+            SET a.name=item.name, a.review_status=item.review_status, a.risk_score=item.risk_score,
+                a.final_risk=item.final_risk, a.premium=item.premium, a.decision=item.decision,
+                a.decision_reason=item.decision_reason, a.created_at=item.created_at,
+                a.customer_id=item.customer_id, a.assigned_underwriter_id=item.underwriter_id
+            FOREACH (_ IN CASE WHEN item.customer_id IS NULL THEN [] ELSE [1] END |
+              MERGE (c:Customer {id:item.customer_id})
+              MERGE (c)-[:SUBMITTED]->(a)
+            )
+            FOREACH (_ IN CASE WHEN item.underwriter_id IS NULL OR item.reviewed_at IS NULL THEN [] ELSE [1] END |
+              MERGE (u:Underwriter {id:item.underwriter_id})
+              MERGE (u)-[:REVIEWED]->(a)
+            )
+            FOREACH (_ IN CASE WHEN item.decision IS NULL OR item.decision = 'Unknown' THEN [] ELSE [1] END |
+              MERGE (d:Decision {application_id:item.application_id})
+              SET d.value=item.decision, d.reason=item.decision_reason, d.reviewed_at=item.reviewed_at
+              MERGE (a)-[:RESULTED_IN]->(d)
+            )
+            FOREACH (_ IN CASE WHEN item.region IS NULL THEN [] ELSE [1] END |
+              MERGE (l:Location {region:item.region})
+              MERGE (a)-[:ASSOCIATED_WITH]->(l)
+            )
+            """,
+            "applications",
+        ),
+        (
+            """
+            UNWIND $items AS item
+            MATCH (a:Application {id:item.application_id})
+            MERGE (rf:RiskFactor {key:item.key})
+            SET rf.name=item.name, rf.value=item.value
+            MERGE (a)-[:HAS_RISK_FACTOR]->(rf)
+            """,
+            "risk_factors",
+        ),
+        (
+            """
+            UNWIND $items AS item
+            MATCH (a:Application {id:item.source_id})
+            MATCH (b:Application {id:item.target_id})
+            MERGE (a)-[:SIMILAR_TO]->(b)
+            """,
+            "similar_applications",
+        ),
+        (
+            """
+            UNWIND $items AS item
+            MERGE (c:Customer {id:item.customer_id})
+            MERGE (p:Policy {id:item.policy_id})
+            SET p.policy_number=item.policy_number, p.status=item.status, p.policy_type=item.policy_type
+            MERGE (c)-[:HAS_POLICY]->(p)
+            """,
+            "policies",
+        ),
+        (
+            """
+            UNWIND $items AS item
+            MERGE (c:Customer {id:item.customer_id})
+            MERGE (cl:Claim {id:item.claim_id})
+            SET cl.claim_number=item.claim_number, cl.amount=item.amount, cl.status=item.status
+            MERGE (c)-[:HAS_CLAIM]->(cl)
+            FOREACH (_ IN CASE WHEN item.policy_id IS NULL THEN [] ELSE [1] END |
+              MERGE (p:Policy {id:item.policy_id})
+              MERGE (p)-[:COVERS]->(cl)
+            )
+            FOREACH (_ IN CASE WHEN item.provider_id IS NULL THEN [] ELSE [1] END |
+              MERGE (p:Provider {id:item.provider_id})
+              MERGE (p)-[:HANDLES]->(cl)
+            )
+            """,
+            "claims",
+        ),
+    )
+    try:
+        with _neo4j_session(driver) as session:
+            for query, key in statements:
+                items = projection.get(key, [])
+                if items:
+                    session.run(query, items=items).consume()
+        return True
+    except Exception:
+        logger.warning("Neo4j system projection synchronization failed")
+        return False
+    finally:
+        driver.close()
+
+
+def _graph_node(node: Any) -> dict[str, Any]:
+    labels = list(node.labels)
+    kind = labels[0].lower() if labels else "entity"
+    properties = dict(node)
+    identifier = properties.get("id")
+    if identifier is None and kind == "location":
+        identifier = properties.get("region")
+    if identifier is None and kind == "riskfactor":
+        identifier = properties.get("key")
+    if identifier is None and kind == "decision":
+        identifier = properties.get("application_id")
+    node_id = f"{kind}-{identifier}"
+    return {"id": node_id, "type": kind, "properties": properties}
+
+
+def _graph_relationship(relationship: Any, start: Any, end: Any) -> dict[str, str]:
+    source = _graph_node(start)["id"]
+    target = _graph_node(end)["id"]
+    return {"source": source, "target": target, "relationship": str(relationship.type).lower()}
+
+
+def neo4j_application_graph(application_id: int) -> dict[str, list]:
+    """Read only the application-centered component; no user-supplied Cypher or labels."""
+    driver = neo4j_driver()
+    if driver is None:
+        return {"nodes": [], "edges": []}
+    query = """
+    MATCH (a:Application {id: $application_id})
+    OPTIONAL MATCH (a)-[r1]-(n1)
+    WHERE n1 IS NULL OR any(label IN labels(n1) WHERE label IN
+      ['Customer','RiskFactor','Policy','Decision','Location','Underwriter','Claim','Provider','Application'])
+    OPTIONAL MATCH (n1)-[r2]-(n2)
+    WHERE n2 IS NULL OR any(label IN labels(n2) WHERE label IN
+      ['Customer','RiskFactor','Policy','Decision','Location','Underwriter','Claim','Provider','Application'])
+    RETURN a, r1, n1, r2, n2
+    LIMIT 500
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[tuple[str, str, str], dict[str, str]] = {}
+    try:
+        with _neo4j_session(driver) as session:
+            for row in session.run(query, application_id=application_id):
+                for node in (row["a"], row["n1"], row["n2"]):
+                    if node is not None:
+                        item = _graph_node(node)
+                        nodes[item["id"]] = item
+                for relationship, start, end in (
+                    (row["r1"], row["a"], row["n1"]),
+                    (row["r2"], row["n1"], row["n2"]),
+                ):
+                    if relationship is not None and start is not None and end is not None:
+                        item = _graph_relationship(relationship, start, end)
+                        edges[(item["source"], item["target"], item["relationship"])] = item
+        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+    except Exception:
+        logger.warning("Neo4j application graph read failed")
+        return {"nodes": [], "edges": []}
+    finally:
+        driver.close()
+
+
+def neo4j_system_graph() -> dict[str, list]:
+    """Read a bounded set of known RiskSure labels for administrator investigation."""
+    driver = neo4j_driver()
+    if driver is None:
+        return {"nodes": [], "edges": []}
+    query = """
+    MATCH (n)
+    WHERE any(label IN labels(n) WHERE label IN
+      ['Customer','Application','RiskFactor','Underwriter','Decision','Policy','Claim','Provider','Location'])
+    WITH n LIMIT 10000
+    OPTIONAL MATCH (n)-[r]-(m)
+    WHERE any(label IN labels(m) WHERE label IN
+      ['Customer','Application','RiskFactor','Underwriter','Decision','Policy','Claim','Provider','Location'])
+    RETURN n, r, m
+    LIMIT 30000
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: dict[tuple[str, str, str], dict[str, str]] = {}
+    try:
+        with _neo4j_session(driver) as session:
+            for row in session.run(query):
+                for node in (row["n"], row["m"]):
+                    if node is not None:
+                        item = _graph_node(node)
+                        nodes[item["id"]] = item
+                relationship, start, end = row["r"], row["n"], row["m"]
+                if relationship is not None and start is not None and end is not None:
+                    item = _graph_relationship(relationship, start, end)
+                    edges[(item["source"], item["target"], item["relationship"])] = item
+        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+    except Exception:
+        logger.warning("Neo4j system graph read failed")
         return {"nodes": [], "edges": []}
     finally:
         driver.close()

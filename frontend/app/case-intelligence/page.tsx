@@ -6,6 +6,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { RoleGuard } from "@/components/auth/role-guard"
 import { Button } from "@/components/ui/button"
 import { apiJson, API_ENDPOINTS } from "@/lib/api"
+import { RelationshipGraphCanvas } from "@/components/underwriting/relationship-graph-canvas"
 
 interface CaseEvidence {
   application: {
@@ -46,7 +47,20 @@ interface CaseEvidence {
   policy_evidence: { text: string; section: number | null; source: string; retrieval: string }[]
   claims: { id: number; claim_number: string; status: string; claimed_amount: number }[]
   human_review_required: boolean
-  ai_explanation: { available: boolean; summary: string | null; warning: string; human_decision_required: boolean }
+  ai_explanation: {
+    available: boolean
+    summary: string | null
+    risk_assessment?: string | null
+    key_risk_factors?: string[]
+    recommended_investigation?: string[]
+    model_evidence?: Record<string, unknown>
+    statistical_evidence?: Record<string, unknown>
+    graph_evidence?: { source: string; nodes: unknown[]; relationships: unknown[] }
+    policy_evidence?: { text: string; source?: string; section?: number | null }[]
+    warnings?: string[]
+    warning: string
+    human_decision_required: boolean
+  }
 }
 
 function EvidenceCard({ title, children }: { title: string; children: React.ReactNode }) {
@@ -150,11 +164,8 @@ function CaseIntelligence() {
               </EvidenceCard>
 
               <EvidenceCard title="Relationship intelligence">
-                <p className="text-sm">Source: {evidence.graph_evidence.source} · Neo4j {evidence.graph_evidence.neo4j_configured ? "configured" : "not configured"}</p>
-                <p className="mt-2 text-sm">{evidence.graph_evidence.nodes.length} related entities · {evidence.graph_evidence.edges.length} relationships · {evidence.claims.length} related claims</p>
-                {evidence.graph_evidence.nodes.length ? <ul className="mt-3 space-y-2 text-sm">
-                  {evidence.graph_evidence.nodes.map((node) => <li key={node.id}><b className="capitalize">{node.type}</b> · {node.id}</li>)}
-                </ul> : <p className="mt-3 text-sm text-muted-foreground">No related graph entities are recorded for this application.</p>}
+                <p className="mb-4 text-sm">Source: {evidence.graph_evidence.source} · Neo4j {evidence.graph_evidence.neo4j_configured ? "configured" : "not configured"} · {evidence.claims.length} related claims</p>
+                <RelationshipGraphCanvas graph={evidence.graph_evidence} />
               </EvidenceCard>
 
               <EvidenceCard title="Retrieved policy evidence">
@@ -175,7 +186,41 @@ function CaseIntelligence() {
                 {assistantLoading ? "Analyzing evidence…" : "Generate evidence summary"}
               </Button>
               {assistantError && <p role="alert" className="mt-3 text-sm text-destructive">{assistantError}</p>}
-              {evidence.ai_explanation.summary && <p className="mt-4 whitespace-pre-wrap rounded-xl bg-white/5 p-4 text-sm">{evidence.ai_explanation.summary}</p>}
+              {evidence.ai_explanation.summary && <div className="mt-4 space-y-4 rounded-xl bg-white/5 p-4">
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">AI interpretation</h3>
+                  <p className="mt-2 whitespace-pre-wrap text-sm">{evidence.ai_explanation.summary}</p>
+                </section>
+                {evidence.ai_explanation.risk_assessment && <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Risk assessment</h3>
+                  <p className="mt-2 whitespace-pre-wrap text-sm">{evidence.ai_explanation.risk_assessment}</p>
+                </section>}
+                {Boolean(evidence.ai_explanation.model_evidence && Object.keys(evidence.ai_explanation.model_evidence).length) && <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Model evidence</h3>
+                  <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{JSON.stringify(evidence.ai_explanation.model_evidence, null, 2)}</pre>
+                </section>}
+                {Boolean(evidence.ai_explanation.statistical_evidence && Object.keys(evidence.ai_explanation.statistical_evidence).length) && <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Statistical evidence</h3>
+                  <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{JSON.stringify(evidence.ai_explanation.statistical_evidence, null, 2)}</pre>
+                </section>}
+                {evidence.ai_explanation.graph_evidence && <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Graph evidence</h3>
+                  <p className="mt-2 text-sm">{evidence.ai_explanation.graph_evidence.nodes.length} entities and {evidence.ai_explanation.graph_evidence.relationships.length} relationships from {evidence.ai_explanation.graph_evidence.source}.</p>
+                </section>}
+                {evidence.ai_explanation.policy_evidence?.length ? <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Retrieved policy evidence</h3>
+                  {evidence.ai_explanation.policy_evidence.map((item, index) => <p key={`${item.source}-${item.section}-${index}`} className="mt-2 text-sm">{item.text}</p>)}
+                </section> : null}
+                {evidence.ai_explanation.key_risk_factors?.length ? <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Key risk factors</h3>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{evidence.ai_explanation.key_risk_factors.map((item) => <li key={item}>{item}</li>)}</ul>
+                </section> : null}
+                {evidence.ai_explanation.recommended_investigation?.length ? <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-primary">Investigation suggestions</h3>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{evidence.ai_explanation.recommended_investigation.map((item) => <li key={item}>{item}</li>)}</ul>
+                </section> : null}
+              </div>}
+              {evidence.ai_explanation.warnings?.map((warning) => <p key={warning} className="mt-3 text-sm text-amber-300">{warning}</p>)}
               {evidence.ai_explanation.warning && <p role="status" className="mt-3 text-sm text-amber-300">{evidence.ai_explanation.warning}</p>}
             </EvidenceCard>
           </div> : null}

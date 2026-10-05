@@ -1,6 +1,7 @@
 import sys
 import os
 import math
+import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Load backend/.env for local runs. Hosted platforms inject real environment
@@ -42,7 +43,7 @@ except Exception as xgb_import_error:  # noqa: BLE001
     print(f"xgboost unavailable: {xgb_import_error}")
 
 from database import db
-from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_upsert_claim, retrieve_policy_chunks
+from integrations import analyze_claim_image, hf_request, index_policy_chunks, neo4j_claim_graph, neo4j_link_application_policy, neo4j_upsert_claim, retrieve_policy_chunks
 from models import (
     Application,
     AuditLog,
@@ -54,7 +55,7 @@ from models import (
     User,
 )
 from services.ai_underwriter_service import ai_underwriter_service
-from services.neo4j_service import application_graph
+from services.neo4j_service import application_graph, filter_graph, sync_application, sync_claim, system_graph
 from services.rag_service import rag_service
 from services.risk_service import analyze_application
 from services.statistical_analysis_service import analyze_applications
@@ -352,6 +353,42 @@ def claim_to_dict(claim):
 
 def provider_for_user(user):
     return Provider.query.filter_by(user_id=user.id).first()
+
+
+def can_access_claim(user, claim):
+    if user is None or claim is None:
+        return False
+    if user.role == "admin":
+        return True
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        return profile is not None and claim.customer_id == profile.id
+    if user.role == "provider":
+        provider = provider_for_user(user)
+        return provider is not None and claim.provider_id == provider.id
+    if user.role == "claims_officer":
+        return claim.assigned_officer_id == user.id
+    if user.role == "underwriter":
+        return Application.query.filter_by(customer_id=claim.customer_id).filter(or_(
+            Application.assigned_underwriter_id.is_(None),
+            Application.assigned_underwriter_id == user.id,
+        )).first() is not None
+    return False
+
+
+def visible_claims_for(user, claim):
+    query = Claim.query
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        query = query.filter_by(customer_id=profile.id if profile else -1)
+    elif user.role == "provider":
+        provider = provider_for_user(user)
+        query = query.filter_by(provider_id=provider.id if provider else -1)
+    elif user.role == "claims_officer":
+        query = query.filter_by(assigned_officer_id=user.id)
+    elif user.role == "underwriter":
+        query = query.filter_by(customer_id=claim.customer_id)
+    return query.order_by(Claim.created_at.desc()).limit(500).all()
 
 
 
@@ -732,7 +769,8 @@ def save():
         if db.session.get(CustomerProfile,customer_id) is None:return jsonify({"error":"Customer profile not found"}),404
         name=" ".join(str(data.get("name","")).split())[:120] or "Unknown"
     a=Application(customer_id=customer_id,name=name,age=int(float(data["age"])),sex=str(data["sex"]).strip().lower(),bmi=float(data["bmi"]),children=int(float(data["children"])),smoker=str(data["smoker"]).strip().lower(),region=str(data["region"]).strip().lower(),risk_score=result["risk_score"],rule_adjustment=result["rule_adjustment"],final_risk=result["final_risk"],decision=result["decision"],premium=result["premium"],review_status="pending")
-    db.session.add(a);db.session.flush();audit(user.id,"application_created","application",a.id,{"model_status":result["model_status"]});db.session.commit()
+    db.session.add(a);db.session.flush();audit(user.id,"application_created","application",a.id,{"model_status":result["model_status"]});audit(user.id,"risk_assessed","application",a.id,{"model_status":result["model_status"],"risk_score":result["risk_score"],"final_risk":result["final_risk"]});db.session.commit()
+    sync_application(a)
     return jsonify({"message":"Application saved successfully","application":a.to_dict()})
 
 
@@ -749,6 +787,11 @@ def get_applications():
         if profile is None:
             return jsonify([])
         query = query.filter_by(customer_id=profile.id)
+    elif user.role == "underwriter":
+        query = query.filter(or_(
+            Application.assigned_underwriter_id.is_(None),
+            Application.assigned_underwriter_id == user.id,
+        ))
     elif user.role in {"claims_officer", "provider"}:
         return jsonify([])
     elif user.role not in {"underwriter", "admin"}:
@@ -761,7 +804,14 @@ def get_applications():
 @app.route("/underwriting/queue", methods=["GET"])
 @roles_required("underwriter", "admin")
 def underwriting_queue():
-    applications = Application.query.order_by(Application.created_at.desc()).all()
+    user = current_user_record()
+    query = Application.query
+    if user.role == "underwriter":
+        query = query.filter(or_(
+            Application.assigned_underwriter_id.is_(None),
+            Application.assigned_underwriter_id == user.id,
+        ))
+    applications = query.order_by(Application.created_at.desc()).all()
     return jsonify([{
         "id": a.id, "name": a.name, "age": a.age, "bmi": a.bmi, "smoker": a.smoker,
         "final_risk": a.final_risk, "decision": a.decision, "premium": a.premium,
@@ -778,6 +828,8 @@ def assign_underwriting(application_id):
     application = db.session.get(Application, application_id)
     if application is None:
         return jsonify({"error": "Application not found"}), 404
+    if user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
+        return jsonify({"error": "Application is assigned to another underwriter"}), 403
     data = request.get_json(silent=True) or {}
     try:
         assignee_id = int(data.get("underwriter_id", user.id))
@@ -786,10 +838,13 @@ def assign_underwriting(application_id):
     assignee = db.session.get(User, assignee_id)
     if assignee is None or assignee.role not in {"underwriter", "admin"}:
         return jsonify({"error": "Invalid underwriter"}), 400
+    if user.role == "underwriter" and assignee.id != user.id:
+        return jsonify({"error": "Underwriters can assign applications only to themselves"}), 403
     application.assigned_underwriter_id = assignee.id
     application.review_status = "in_review"
     audit(user.id, "underwriting_assigned", "application", application.id, {"underwriter_id": assignee.id})
     db.session.commit()
+    sync_application(application)
     return jsonify({"message": "Application assigned", "application_id": application.id, "underwriter_id": assignee.id})
 
 
@@ -839,6 +894,16 @@ def underwriting_decision(application_id):
             policy_id = existing.id
     audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason, "policy_id": policy_id})
     db.session.commit()
+    sync_application(application)
+    if policy_id is not None:
+        associated_policy = db.session.get(Policy, policy_id)
+        if associated_policy is not None:
+            neo4j_link_application_policy(application.id, {
+                "policy_id": associated_policy.id,
+                "policy_number": associated_policy.policy_number,
+                "status": associated_policy.status,
+                "policy_type": associated_policy.policy_type,
+            })
     return jsonify({"message": "Underwriting decision recorded", "application": {
         "id": application.id, "decision": application.decision, "decision_reason": application.decision_reason,
         "review_status": application.review_status, "reviewed_at": application.reviewed_at.isoformat() if application.reviewed_at else None, "policy_id": policy_id
@@ -860,6 +925,8 @@ def get_application(application_id):
         profile = customer_for_user(user)
         if profile is None or application.customer_id != profile.id:
             return jsonify({"error": "Insufficient permissions"}), 403
+    elif user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
+        return jsonify({"error": "Application is assigned to another underwriter"}), 403
     elif user.role not in {"underwriter", "admin"}:
         return jsonify({"error": "Insufficient permissions"}), 403
 
@@ -939,6 +1006,7 @@ def create_claim():
     db.session.flush()
     audit(user.id, "claim_created", "claim", claim.id)
     db.session.commit()
+    sync_claim(claim)
     return jsonify({"message": "Claim submitted", "claim": claim_to_dict(claim)}), 201
 
 
@@ -995,6 +1063,7 @@ def update_claim(claim_id):
         claim.assigned_officer_id = officer.id
     audit(user.id, "claim_updated", "claim", claim.id, data)
     db.session.commit()
+    sync_claim(claim)
     return jsonify({"message": "Claim updated", "claim": claim_to_dict(claim)})
 
 
@@ -1224,7 +1293,10 @@ def policy_intelligence(policy_id):
 def fraud_investigation(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
-    related=Claim.query.filter((Claim.customer_id==c.customer_id)|(Claim.provider_id==c.provider_id)).all();signals=[]
+    user = current_user_record()
+    if not can_access_claim(user, c):
+        return jsonify({"error": "Insufficient permissions"}),403
+    related=visible_claims_for(user, c);signals=[]
     if len([x for x in related if x.customer_id==c.customer_id])>=3:signals.append({"type":"repeat_customer","severity":"medium"})
     if c.provider_id and len([x for x in related if x.provider_id==c.provider_id])>=3:signals.append({"type":"repeat_provider","severity":"medium"})
     if (c.claimed_amount or 0)>100000:signals.append({"type":"high_amount","severity":"high"})
@@ -1232,7 +1304,7 @@ def fraud_investigation(claim_id):
     audit(current_user_record().id,"fraud_investigation_viewed","claim",c.id,{"anomaly_score":score});db.session.commit()
     try:
         neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id})
-        graph_from_neo4j=neo4j_claim_graph(c.id)
+        graph_from_neo4j=neo4j_claim_graph(c.id, allowed_claim_ids=[claim.id for claim in related])
     except Exception:
         graph_from_neo4j={"nodes":[],"edges":[]}
     nodes=graph_from_neo4j["nodes"] or [{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}]
@@ -1305,6 +1377,8 @@ def risk_analysis(application_id):
         profile = customer_for_user(user)
         if profile is None or application.customer_id != profile.id:
             return jsonify({"error": "Insufficient permissions"}), 403
+    elif user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
+        return jsonify({"error": "Application is assigned to another underwriter"}), 403
     evidence = application_risk_analysis(application)
     return jsonify({"application_id": application.id, **evidence})
 
@@ -1315,7 +1389,8 @@ def _case_intelligence_payload(application, policy_question="underwriting eligib
     cohort = Application.query.order_by(Application.created_at.desc()).limit(1000).all()
     risk = analyze_application(application, model=model, model_loaded=model_loaded)
     statistics = analyze_applications(cohort, subject=application)
-    graph = application_graph(application, claims, policy)
+    related_applications = visible_related_applications(current_user_record(), application)
+    graph = application_graph(application, claims, policy, related_applications)
     policy_evidence = rag_service.retrieve_policy_context(policy, policy_question) if policy else []
     decision_history = AuditLog.query.filter_by(
         entity_type="application",
@@ -1343,6 +1418,18 @@ def _case_intelligence_payload(application, policy_question="underwriting eligib
             "human_decision_required": True,
         },
     }
+
+
+def visible_related_applications(user, application):
+    if application.customer_id is None:
+        return []
+    query = Application.query.filter_by(customer_id=application.customer_id)
+    if user.role == "underwriter":
+        query = query.filter(or_(
+            Application.assigned_underwriter_id.is_(None),
+            Application.assigned_underwriter_id == user.id,
+        ))
+    return query.order_by(Application.created_at.desc()).limit(100).all()
 
 
 @app.route("/cases/<int:application_id>/intelligence",methods=["GET"])
@@ -1384,7 +1471,7 @@ def case_assistant(application_id):
         return jsonify({"error": "Question must be 500 characters or fewer"}), 400
     evidence = _case_intelligence_payload(application, policy_question=question)
     evidence.pop("ai_explanation", None)
-    result = ai_underwriter_service.summarize(evidence)
+    result = ai_underwriter_service.summarize(evidence, question=question)
     audit(user.id, "underwriter_ai_analysis", "application", application.id, {
         "ai_available": result["available"],
         "policy_evidence_count": len(evidence["policy_evidence"]),
@@ -1408,7 +1495,11 @@ def relationship_graph():
             return jsonify({"error": "Application is assigned to another underwriter"}), 403
         related_claims = Claim.query.filter_by(customer_id=application.customer_id).order_by(Claim.created_at.desc()).all() if application.customer_id else []
         policy = Policy.query.filter_by(customer_id=application.customer_id).order_by(Policy.created_at.desc()).first() if application.customer_id else None
-        graph = application_graph(application, related_claims, policy)
+        related_applications = visible_related_applications(user, application)
+        graph = application_graph(application, related_claims, policy, related_applications)
+        expand_node_id = request.args.get("expand_node_id", "").strip()
+        if expand_node_id:
+            graph = filter_graph(graph, expand_node_id=expand_node_id)
         audit(user.id, "application_graph_viewed", "application", application.id, {"source": graph["source"]})
         db.session.commit()
         return jsonify({**graph, "claims": [claim_to_dict(claim) for claim in related_claims]})
@@ -1450,7 +1541,7 @@ def relationship_graph():
         }
         try:
             neo4j_upsert_claim(payload)
-            graph = neo4j_claim_graph(claim.id)
+            graph = neo4j_claim_graph(claim.id, allowed_claim_ids=[item.id for item in claims])
         except Exception:
             graph = {"nodes": [], "edges": []}
 
@@ -1507,20 +1598,46 @@ def relationship_graph():
     })
 
 
+@app.route("/admin/graph", methods=["GET"])
+@roles_required("admin")
+def admin_relationship_graph():
+    user = current_user_record()
+    graph = system_graph(
+        Application.query.order_by(Application.created_at.desc()).limit(1000).all(),
+        Claim.query.order_by(Claim.created_at.desc()).limit(1000).all(),
+        Policy.query.order_by(Policy.created_at.desc()).limit(1000).all(),
+        CustomerProfile.query.order_by(CustomerProfile.id.desc()).limit(1000).all(),
+        Provider.query.order_by(Provider.id.desc()).limit(1000).all(),
+        User.query.filter_by(role="underwriter").order_by(User.id.desc()).limit(1000).all(),
+    )
+    search = request.args.get("search", "").strip()[:160]
+    node_type = request.args.get("type", "").strip().lower()
+    if node_type and node_type not in {"customer", "application", "riskfactor", "underwriter", "decision", "policy", "claim", "provider", "location"}:
+        return jsonify({"error": "Unsupported graph entity type"}), 400
+    expand_node_id = request.args.get("expand_node_id", "").strip()
+    if expand_node_id and not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,119}", expand_node_id):
+        return jsonify({"error": "Invalid graph node identifier"}), 400
+    graph = filter_graph(graph, search=search, node_type=node_type, expand_node_id=expand_node_id)
+    audit(user.id, "admin_graph_investigation", "system", None, {
+        "source": graph["source"],
+        "search_used": bool(search),
+        "expand_used": bool(expand_node_id),
+        "entity_type": node_type or None,
+    })
+    db.session.commit()
+    return jsonify(graph)
+
+
 @app.route("/graph/claim/<int:claim_id>",methods=["GET"])
 @roles_required("customer","underwriter","claims_officer","provider","admin")
 def claim_graph(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
     user = current_user_record()
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None or c.customer_id != profile.id:
-            return jsonify({"error":"Insufficient permissions"}),403
-    elif user.role == "provider":
-        provider = provider_for_user(user)
-        if provider is None or c.provider_id != provider.id:
-            return jsonify({"error":"Insufficient permissions"}),403
+    if not can_access_claim(user, c):
+        return jsonify({"error":"Insufficient permissions"}),403
+    visible_claims = visible_claims_for(user, c)
+    visible_ids = [claim.id for claim in visible_claims]
 
     try:
         neo4j_upsert_claim({
@@ -1531,11 +1648,13 @@ def claim_graph(claim_id):
             "status": c.status,
             "provider_id": c.provider_id,
         })
-        graph = neo4j_claim_graph(c.id)
+        graph = neo4j_claim_graph(c.id, allowed_claim_ids=visible_ids)
     except Exception:
         graph = {"nodes": [], "edges": []}
 
     if graph.get("nodes"):
+        audit(user.id, "claim_graph_viewed", "claim", c.id, {"source": "neo4j"})
+        db.session.commit()
         return jsonify({
             "source": "neo4j",
             "neo4j_configured": True,
@@ -1543,7 +1662,7 @@ def claim_graph(claim_id):
             "edges": graph["edges"],
         })
 
-    related=Claim.query.filter((Claim.customer_id==c.customer_id)|(Claim.provider_id==c.provider_id)).all()
+    related=visible_claims
     nodes=[];edges=[]
     def add(n,t): 
         if not any(x["id"]==n for x in nodes):nodes.append({"id":n,"type":t})
@@ -1552,6 +1671,8 @@ def claim_graph(claim_id):
         add("claim-"+str(x.id),"claim");edges.append({"source":"customer-"+str(c.customer_id),"target":"claim-"+str(x.id),"relationship":"submitted"})
         if x.provider_id:
             add("provider-"+str(x.provider_id),"provider");edges.append({"source":"provider-"+str(x.provider_id),"target":"claim-"+str(x.id),"relationship":"submitted_to"})
+    audit(user.id, "claim_graph_viewed", "claim", c.id, {"source": "postgres"})
+    db.session.commit()
     return jsonify({
         "source": "postgres",
         "neo4j_configured": bool(os.getenv("NEO4J_URI") and os.getenv("NEO4J_USERNAME") and os.getenv("NEO4J_PASSWORD")),
@@ -1564,6 +1685,8 @@ def claim_graph(claim_id):
 def claim_intelligence(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
+    if not can_access_claim(current_user_record(), c):
+        return jsonify({"error":"Insufficient permissions"}),403
     d=request.get_json(silent=True) or {};text=str(d.get("document_text","")).strip()
     extracted={"claim_number":c.claim_number,"claimed_amount":c.claimed_amount,"document_present":bool(text)}
     signals=[]
@@ -1576,6 +1699,8 @@ def claim_intelligence(claim_id):
 def claim_image_intelligence(claim_id):
     c=db.session.get(Claim,claim_id)
     if not c:return jsonify({"error":"Claim not found"}),404
+    if not can_access_claim(current_user_record(), c):
+        return jsonify({"error":"Insufficient permissions"}),403
     d=request.get_json(silent=True) or {}
     path=str(d.get("image_path","")).strip()
     upload_root=os.path.realpath(os.getenv("CLAIM_IMAGE_DIR","")).strip()

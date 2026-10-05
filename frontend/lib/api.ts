@@ -22,6 +22,7 @@ export const API_ENDPOINTS = {
   adminOverview: "/admin/overview",
   adminAudit: "/admin/audit-logs",
   adminRole: (id: number) => `/admin/users/${id}/role`,
+  adminGraph: "/admin/graph",
   policies: "/policies",
   policyIntelligence: (id: number) => `/policies/${id}/intelligence`,
   policyDocument: (id: number) => `/policies/${id}/document`,
