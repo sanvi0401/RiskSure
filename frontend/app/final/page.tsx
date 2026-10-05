@@ -5,12 +5,14 @@ import { useRouter } from "next/navigation"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { Button } from "@/components/ui/button"
 import { StatusBadge } from "@/components/ui/status-badge"
+import { getDashboardRoute, useAuth } from "@/context/auth-context"
 import { useApplication } from "@/context/application-context"
 import { apiJson, API_ENDPOINTS } from "@/lib/api"
 import { ArrowLeft, Save, Loader2, CheckCircle } from "lucide-react"
 
 export default function FinalPage() {
   const router = useRouter()
+  const { user } = useAuth()
   const { applicationData, resetApplication } = useApplication()
   const [isSaving, setIsSaving] = useState(false)
   const [isSaved, setIsSaved] = useState(false)
@@ -40,7 +42,7 @@ export default function FinalPage() {
       setIsSaved(true)
       setTimeout(() => {
         resetApplication()
-        router.push("/dashboard")
+        router.push(user ? getDashboardRoute(user.role) : "/login")
       }, 1500)
     } catch (error) {
       console.error("Application save failed:", error)

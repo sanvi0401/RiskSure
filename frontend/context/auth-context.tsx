@@ -21,6 +21,20 @@ async function refreshAccessToken(): Promise<string | null> {
 }
 
 export type UserRole = "customer" | "underwriter" | "claims_officer" | "provider" | "admin"
+export function getDashboardRoute(role: UserRole): string {
+  switch (role) {
+    case "customer":
+      return "/customer"
+    case "underwriter":
+      return "/underwriter"
+    case "claims_officer":
+      return "/claims"
+    case "provider":
+      return "/provider"
+    case "admin":
+      return "/admin"
+  }
+}
 export interface AuthUser { id:number; email:string; role:UserRole; created_at?:string|null }
 interface AuthContextType {
  user:AuthUser|null; token:string|null; isLoading:boolean

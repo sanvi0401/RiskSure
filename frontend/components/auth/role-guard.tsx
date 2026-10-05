@@ -2,7 +2,7 @@
 
 import { useEffect } from "react"
 import { usePathname, useRouter } from "next/navigation"
-import { useAuth, UserRole } from "@/context/auth-context"
+import { getDashboardRoute, useAuth, UserRole } from "@/context/auth-context"
 
 interface RoleGuardProps {
   allowedRoles: UserRole[]
@@ -21,7 +21,7 @@ export function RoleGuard({ allowedRoles, children }: RoleGuardProps) {
       return
     }
     if (!hasRole(allowedRoles)) {
-      router.replace("/dashboard")
+      router.replace(getDashboardRoute(user.role))
     }
   }, [isLoading, user, hasRole, allowedRoles, router, pathname])
 
