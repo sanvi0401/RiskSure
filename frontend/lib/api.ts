@@ -7,6 +7,7 @@ export const API_BASE_URL =
 
 export const API_ENDPOINTS = {
   applications: "/applications",
+  application: (id: number) => `/applications/${id}`,
   health: "/health",
   process: "/process",
   save: "/save",
@@ -28,6 +29,8 @@ export const API_ENDPOINTS = {
   billing: "/billing",
   customerPortal: "/customer/portal",
   caseIntelligence: (id: number) => `/cases/${id}/intelligence`,
+  caseAssistant: (id: number) => `/cases/${id}/assistant`,
+  riskAnalysis: (id: number) => `/applications/${id}/risk-analysis`,
   claimIntelligence: (id: number) => `/claims/${id}/intelligence`,
   claimGraph: (id: number) => `/graph/claim/${id}`,
   relationshipGraph: "/graph",

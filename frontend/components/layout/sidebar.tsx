@@ -20,7 +20,7 @@ const navItems: { href: string; label: string; icon: typeof LayoutDashboard; rol
   { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter","claims_officer","admin"] },
   { href: "/fraud", label: "Fraud Investigation", icon: Network, roles: ["underwriter","claims_officer","admin"] },
   { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","claims_officer","admin"] },
-  { href: "/relationship-graph", label: "Relationship Graph", icon: Network, roles: ["customer","underwriter","claims_officer","provider","admin"] },
+  { href: "/relationship-graph", label: "Relationship Graph", icon: Network, roles: ["underwriter","claims_officer","provider","admin"] },
   { href: "/admin", label: "Admin Centre", icon: Users, roles: ["admin"] },
 ]
 

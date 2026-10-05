@@ -88,11 +88,40 @@ def test_model_predictions_are_plausible():
         assert prediction > 1000, (row, prediction)
 
 def test_relationship_graph_is_role_scoped(client, session):
-    headers = {"Authorization": "Bearer " + session["access_token"]}
+    customer_headers = {"Authorization": "Bearer " + session["access_token"]}
+    assert client.get("/graph", headers=customer_headers).status_code == 403
+
+    with backend.app.app_context():
+        user = backend.User.query.filter_by(email="smoke@example.com").one()
+        profile = backend.CustomerProfile.query.filter_by(user_id=user.id).one()
+        application = backend.Application(
+            customer_id=profile.id,
+            name="Scoped graph test",
+            age=APPLICANT["age"],
+            sex=APPLICANT["sex"],
+            bmi=APPLICANT["bmi"],
+            children=APPLICANT["children"],
+            smoker=APPLICANT["smoker"],
+            region=APPLICANT["region"],
+        )
+        backend.db.session.add(application)
+        user.role = "underwriter"
+        backend.db.session.commit()
+        underwriter_token = backend.auth_token(user)
+        application_id = application.id
+
+    headers = {"Authorization": "Bearer " + underwriter_token}
     response = client.get("/graph", headers=headers)
+    assert response.status_code == 400, response.json
+    response = client.get(f"/graph?application_id={application_id}", headers=headers)
     assert response.status_code == 200, response.json
     body = response.json
     assert body["source"] in {"neo4j", "postgres"}
     assert isinstance(body["nodes"], list)
     assert isinstance(body["edges"], list)
+    assert any(node["id"] == f"application-{application_id}" for node in body["nodes"])
 
+    with backend.app.app_context():
+        user = backend.User.query.filter_by(email="smoke@example.com").one()
+        user.role = "customer"
+        backend.db.session.commit()

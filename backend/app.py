@@ -28,7 +28,7 @@ import json
 import pyotp
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import text as sql_text
+from sqlalchemy import or_, text as sql_text
 from sqlalchemy.exc import IntegrityError
 
 # xgboost raises XGBoostError (not ImportError) when its native library cannot
@@ -53,6 +53,11 @@ from models import (
     Provider,
     User,
 )
+from services.ai_underwriter_service import ai_underwriter_service
+from services.neo4j_service import application_graph
+from services.rag_service import rag_service
+from services.risk_service import analyze_application
+from services.statistical_analysis_service import analyze_applications
 
 RISKSURE_ENV = os.getenv("RISKSURE_ENV", "").strip().lower()
 ALLOW_INSECURE_DEV = os.getenv("RISKSURE_ALLOW_INSECURE_DEV", "").strip().lower() == "true"
@@ -316,6 +321,15 @@ def audit(user_id, action, entity_type=None, entity_id=None, details=None):
         details=json.dumps(details) if isinstance(details, (dict, list)) else details,
     )
     db.session.add(entry)
+
+
+def _parse_audit_details(details):
+    if not details or details[:1] not in {"{", "["}:
+        return details
+    try:
+        return json.loads(details)
+    except json.JSONDecodeError:
+        return details
 
 
 def claim_to_dict(claim):
@@ -1045,14 +1059,53 @@ def admin_update_role(user_id):
 @app.route("/admin/audit-logs", methods=["GET"])
 @roles_required("admin")
 def admin_audit_logs():
-    logs = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    try:
+        limit = int(request.args.get("limit", "200"))
+        user_id = request.args.get("user_id", type=int)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid audit filter"}), 400
+    if not 1 <= limit <= 500:
+        return jsonify({"error": "limit must be between 1 and 500"}), 400
+
+    query = AuditLog.query.outerjoin(User, AuditLog.user_id == User.id)
+    if user_id is not None:
+        query = query.filter(AuditLog.user_id == user_id)
+    if role := request.args.get("role", "").strip().lower():
+        if role not in VALID_ROLES:
+            return jsonify({"error": "Invalid role filter"}), 400
+        query = query.filter(User.role == role)
+    if action := request.args.get("action", "").strip():
+        query = query.filter(AuditLog.action.ilike(f"%{action[:120]}%"))
+    if entity_type := request.args.get("entity_type", "").strip():
+        query = query.filter(AuditLog.entity_type.ilike(f"%{entity_type[:80]}%"))
+    if search := request.args.get("search", "").strip():
+        pattern = f"%{search[:160]}%"
+        query = query.filter(
+            or_(
+                AuditLog.action.ilike(pattern),
+                AuditLog.entity_type.ilike(pattern),
+                AuditLog.details.ilike(pattern),
+                User.email.ilike(pattern),
+            )
+        )
+    try:
+        if start := request.args.get("start_date", "").strip():
+            query = query.filter(AuditLog.created_at >= datetime.fromisoformat(start))
+        if end := request.args.get("end_date", "").strip():
+            query = query.filter(AuditLog.created_at < datetime.fromisoformat(end) + timedelta(days=1))
+    except ValueError:
+        return jsonify({"error": "Dates must be valid ISO-8601 dates"}), 400
+
+    logs = query.order_by(AuditLog.created_at.desc()).limit(limit).all()
     return jsonify([{
         "id": log.id,
         "user_id": log.user_id,
+        "user_email": log.user.email if log.user else None,
+        "role": log.user.role if log.user else None,
         "action": log.action,
         "entity_type": log.entity_type,
         "entity_id": log.entity_id,
-        "details": log.details,
+        "details": _parse_audit_details(log.details),
         "created_at": log.created_at.isoformat() if log.created_at else None,
     } for log in logs])
 
@@ -1060,12 +1113,51 @@ def admin_audit_logs():
 @app.route("/admin/overview", methods=["GET"])
 @roles_required("admin")
 def admin_overview():
+    applications = Application.query.order_by(Application.created_at.desc()).limit(1000).all()
+    assigned_counts = (
+        db.session.query(Application.assigned_underwriter_id, db.func.count(Application.id))
+        .filter(Application.assigned_underwriter_id.isnot(None))
+        .group_by(Application.assigned_underwriter_id)
+        .all()
+    )
+    workload = {user_id: count for user_id, count in assigned_counts}
+    staff = User.query.filter(User.role.in_(("underwriter", "admin"))).order_by(User.email.asc()).all()
+    activity = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(10).all()
     return jsonify({
         "users": User.query.count(),
         "customers": CustomerProfile.query.count(),
+        "underwriters": User.query.filter_by(role="underwriter").count(),
+        "claims_officers": User.query.filter_by(role="claims_officer").count(),
+        "providers_users": User.query.filter_by(role="provider").count(),
         "providers": Provider.query.count(),
         "policies": Policy.query.count(),
         "applications": Application.query.count(),
+        "pending_applications": Application.query.filter_by(review_status="pending").count(),
+        "applications_under_review": Application.query.filter_by(review_status="in_review").count(),
+        "approved_applications": Application.query.filter(Application.decision.in_(("Approved", "Approved with Conditions"))).count(),
+        "rejected_applications": Application.query.filter_by(decision="Rejected").count(),
+        "high_risk_applications": Application.query.filter(Application.final_risk >= 0.67).count(),
+        "medium_risk_applications": Application.query.filter(Application.final_risk >= 0.34, Application.final_risk < 0.67).count(),
+        "low_risk_applications": Application.query.filter(Application.final_risk < 0.34).count(),
+        "risk_distribution": {
+            "low": sum((application.final_risk or 0) < 0.34 for application in applications),
+            "medium": sum(0.34 <= (application.final_risk or 0) < 0.67 for application in applications),
+            "high": sum((application.final_risk or 0) >= 0.67 for application in applications),
+        },
+        "underwriting_workload": [{
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "assigned_applications": workload.get(user.id, 0),
+        } for user in staff],
+        "recent_activity": [{
+            "id": entry.id,
+            "user_id": entry.user_id,
+            "action": entry.action,
+            "entity_type": entry.entity_type,
+            "entity_id": entry.entity_id,
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        } for entry in activity],
         "claims": Claim.query.count(),
         "billing_transactions": BillingTransaction.query.count(),
     })
@@ -1194,35 +1286,144 @@ def customer_portal():
     if not p:return jsonify({"error":"Customer profile not found"}),404
     return jsonify({"profile":{"id":p.id,"full_name":p.full_name,"phone":p.phone,"city":p.city,"state":p.state},"policies":[policy_to_dict(x) for x in Policy.query.filter_by(customer_id=p.id).all()],"claims":[claim_to_dict(x) for x in Claim.query.filter_by(customer_id=p.id).all()],"applications":[x.to_dict() for x in Application.query.filter_by(customer_id=p.id).all()]})
 
+
+def application_risk_analysis(application):
+    evidence = analyze_application(application, model=model, model_loaded=model_loaded)
+    audit(current_user_record().id, "risk_analysis_viewed", "application", application.id)
+    db.session.commit()
+    return evidence
+
+
+@app.route("/applications/<int:application_id>/risk-analysis", methods=["GET"])
+@roles_required("customer", "underwriter", "admin")
+def risk_analysis(application_id):
+    application = db.session.get(Application, application_id)
+    if application is None:
+        return jsonify({"error": "Application not found"}), 404
+    user = current_user_record()
+    if user.role == "customer":
+        profile = customer_for_user(user)
+        if profile is None or application.customer_id != profile.id:
+            return jsonify({"error": "Insufficient permissions"}), 403
+    evidence = application_risk_analysis(application)
+    return jsonify({"application_id": application.id, **evidence})
+
+
+def _case_intelligence_payload(application, policy_question="underwriting eligibility risk exclusions"):
+    claims = Claim.query.filter_by(customer_id=application.customer_id).order_by(Claim.created_at.desc()).all() if application.customer_id else []
+    policy = Policy.query.filter_by(customer_id=application.customer_id).order_by(Policy.created_at.desc()).first() if application.customer_id else None
+    cohort = Application.query.order_by(Application.created_at.desc()).limit(1000).all()
+    risk = analyze_application(application, model=model, model_loaded=model_loaded)
+    statistics = analyze_applications(cohort, subject=application)
+    graph = application_graph(application, claims, policy)
+    policy_evidence = rag_service.retrieve_policy_context(policy, policy_question) if policy else []
+    decision_history = AuditLog.query.filter_by(
+        entity_type="application",
+        entity_id=application.id,
+        action="underwriting_decision",
+    ).order_by(AuditLog.created_at.desc()).limit(20).all()
+    return {
+        "application": application.to_dict(),
+        "risk": risk,
+        "statistics": statistics,
+        "graph_evidence": graph,
+        "policy": policy_to_dict(policy) if policy else None,
+        "policy_evidence": policy_evidence,
+        "claims": [claim_to_dict(claim) for claim in claims],
+        "decision_history": [{
+            "underwriter_id": entry.user_id,
+            "timestamp": entry.created_at.isoformat() if entry.created_at else None,
+            **(_parse_audit_details(entry.details) if isinstance(_parse_audit_details(entry.details), dict) else {}),
+        } for entry in decision_history],
+        "human_review_required": application.review_status not in {"completed"} or application.final_risk >= 0.67,
+        "ai_explanation": {
+            "available": False,
+            "summary": None,
+            "warning": "AI explanation has not been requested.",
+            "human_decision_required": True,
+        },
+    }
+
+
 @app.route("/cases/<int:application_id>/intelligence",methods=["GET"])
 @roles_required("underwriter","claims_officer","admin")
 def unified_case_intelligence(application_id):
     a=db.session.get(Application,application_id)
     if not a:return jsonify({"error":"Application not found"}),404
-    claims=Claim.query.filter_by(customer_id=a.customer_id).all() if a.customer_id else [];p=Policy.query.filter_by(customer_id=a.customer_id).first() if a.customer_id else None
-    signals=[{"claim_id":c.id,"provider_id":c.provider_id} for c in claims if c.provider_id]
-    consistency=["High-value claim requires human review."] if any((c.claimed_amount or 0)>100000 for c in claims) else []
-    return jsonify({"application":a.to_dict(),"risk":{"model_score":a.risk_score,"final_risk":a.final_risk,"decision":a.decision},"policy":policy_to_dict(p) if p else None,"claims":[claim_to_dict(c) for c in claims],"relationship_signals":signals,"document_consistency":consistency,"human_review_required":bool(consistency or a.review_status in {"manual_review","in_review"})})
+    user = current_user_record()
+    if user.role == "underwriter" and a.assigned_underwriter_id not in {None, user.id}:
+        return jsonify({"error": "Application is assigned to another underwriter"}),403
+    result = _case_intelligence_payload(a)
+    audit(user.id, "case_intelligence_viewed", "application", a.id)
+    db.session.commit()
+    result["relationship_signals"] = [
+        {"claim_id": claim.id, "provider_id": claim.provider_id}
+        for claim in Claim.query.filter_by(customer_id=a.customer_id).all()
+        if a.customer_id and claim.provider_id
+    ]
+    result["document_consistency"] = [
+        "High-value claim requires human review."
+        for claim in Claim.query.filter_by(customer_id=a.customer_id).all()
+        if a.customer_id and (claim.claimed_amount or 0) > 100000
+    ]
+    return jsonify(result)
+
+
+@app.route("/cases/<int:application_id>/assistant", methods=["POST"])
+@roles_required("underwriter", "admin")
+def case_assistant(application_id):
+    application = db.session.get(Application, application_id)
+    if application is None:
+        return jsonify({"error": "Application not found"}), 404
+    user = current_user_record()
+    if user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
+        return jsonify({"error": "Application is assigned to another underwriter"}), 403
+    request_data = request.get_json(silent=True) or {}
+    question = str(request_data.get("question", "underwriting eligibility risk exclusions")).strip()
+    if len(question) > 500:
+        return jsonify({"error": "Question must be 500 characters or fewer"}), 400
+    evidence = _case_intelligence_payload(application, policy_question=question)
+    evidence.pop("ai_explanation", None)
+    result = ai_underwriter_service.summarize(evidence)
+    audit(user.id, "underwriter_ai_analysis", "application", application.id, {
+        "ai_available": result["available"],
+        "policy_evidence_count": len(evidence["policy_evidence"]),
+    })
+    db.session.commit()
+    return jsonify({**result, "application_id": application.id})
 
 @app.route("/graph", methods=["GET"])
-@roles_required("customer", "underwriter", "claims_officer", "provider", "admin")
+@roles_required("underwriter", "claims_officer", "provider", "admin")
 def relationship_graph():
     """Return a role-scoped relationship graph for the frontend."""
     user = current_user_record()
+    if user.role == "underwriter":
+        application_id = request.args.get("application_id", type=int)
+        if application_id is None:
+            return jsonify({"error": "application_id is required for underwriter graph access"}), 400
+        application = db.session.get(Application, application_id)
+        if application is None:
+            return jsonify({"error": "Application not found"}), 404
+        if application.assigned_underwriter_id not in {None, user.id}:
+            return jsonify({"error": "Application is assigned to another underwriter"}), 403
+        related_claims = Claim.query.filter_by(customer_id=application.customer_id).order_by(Claim.created_at.desc()).all() if application.customer_id else []
+        policy = Policy.query.filter_by(customer_id=application.customer_id).order_by(Policy.created_at.desc()).first() if application.customer_id else None
+        graph = application_graph(application, related_claims, policy)
+        audit(user.id, "application_graph_viewed", "application", application.id, {"source": graph["source"]})
+        db.session.commit()
+        return jsonify({**graph, "claims": [claim_to_dict(claim) for claim in related_claims]})
+
     query = Claim.query.order_by(Claim.created_at.desc())
 
-    if user.role == "customer":
-        profile = customer_for_user(user)
-        if profile is None:
-            return jsonify({"source": "postgres", "nodes": [], "edges": [], "claims": []})
-        query = query.filter_by(customer_id=profile.id)
+    if user.role == "claims_officer":
+        query = query.filter_by(assigned_officer_id=user.id)
     elif user.role == "provider":
         provider = provider_for_user(user)
         if provider is None:
             return jsonify({"source": "postgres", "nodes": [], "edges": [], "claims": []})
         query = query.filter_by(provider_id=provider.id)
 
-    claims = query.limit(100).all()
+    claims = query.limit(100 if user.role == "admin" else 250).all()
     nodes, edges = [], []
     seen_nodes, seen_edges = set(), set()
     neo4j_used = False
@@ -1275,6 +1476,28 @@ def relationship_graph():
                 add_node(provider_node, "provider", {"id": claim.provider_id})
                 add_edge(provider_node, claim_node, "handles")
 
+    if user.role == "admin":
+        applications = Application.query.order_by(Application.created_at.desc()).limit(1000).all()
+        for application in applications:
+            application_node = f"application-{application.id}"
+            add_node(application_node, "application", {
+                "id": application.id,
+                "review_status": application.review_status,
+                "risk_score": application.final_risk,
+            })
+            if application.customer_id is not None:
+                customer_node = f"customer-{application.customer_id}"
+                add_node(customer_node, "customer", {"id": application.customer_id})
+                add_edge(customer_node, application_node, "submitted")
+        for policy in Policy.query.order_by(Policy.created_at.desc()).limit(1000).all():
+            policy_node = f"policy-{policy.id}"
+            add_node(policy_node, "policy", {"id": policy.id, "policy_number": policy.policy_number, "status": policy.status})
+            customer_node = f"customer-{policy.customer_id}"
+            add_node(customer_node, "customer", {"id": policy.customer_id})
+            add_edge(customer_node, policy_node, "holds")
+
+    audit(user.id, "relationship_graph_viewed", "system" if user.role == "admin" else "claim", None, {"role": user.role})
+    db.session.commit()
     return jsonify({
         "source": "neo4j" if neo4j_used else "postgres",
         "neo4j_configured": bool(os.getenv("NEO4J_URI") and os.getenv("NEO4J_USERNAME") and os.getenv("NEO4J_PASSWORD")),
