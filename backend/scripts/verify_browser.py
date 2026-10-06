@@ -37,10 +37,15 @@ def check_page():
 
 
 def select_option(placeholder, value):
-    browser(["eval", "Array.from(document.querySelectorAll('[role=combobox]')).find(b => b.textContent.trim() === "
-             + json.dumps(placeholder) + ")?.scrollIntoView({block:'center'}); true"])
-    browser(["find", "role", "combobox", "click", "--name", placeholder, "--exact"])
-    browser(["find", "role", "option", "click", "--name", value, "--exact"])
+    browser(["eval", "(() => { const trigger = Array.from(document.querySelectorAll('[role=combobox]'))"
+             ".find(b => b.textContent.trim() === " + json.dumps(placeholder) + "); "
+             "trigger.setAttribute('data-release-select', 'true'); trigger.scrollIntoView({block:'center'}); return true; })()"])
+    browser(["click", '[data-release-select="true"]'])
+    references = json.loads(browser(["snapshot", "-i", "--json"]))["data"]["refs"]
+    option = next(key for key, item in references.items() if item["role"] == "option" and item["name"] == value)
+    browser(["click", "@" + option])
+    browser(["wait", "--fn", "document.querySelector('[data-release-select]').textContent.trim() === " + json.dumps(value)])
+    browser(["eval", "document.querySelector('[data-release-select]').removeAttribute('data-release-select'); true"])
 
 
 def customer_flow(args, state):
@@ -147,15 +152,14 @@ def main():
         raise RuntimeError("Browser reported an uncaught error")
     if args.customer_flow:
         customer_flow(args, state)
-    if args.human_decision:
-        human_decision(args, state)
     if args.role == "underwriter" and state.get("application_id"):
         application_id = state["application_id"]
-        for path, label, content in ((f"/applications/{application_id}", "application", "Risk"),
+        for path, label, content in ((f"/applications/{application_id}", "application", "Applicant information"),
                             (f"/case-intelligence?id={application_id}", "case-intelligence", "Retrieved policy evidence"),
                             (f"/relationship-graph?application_id={application_id}", "relationship-graph", "Relationship Map")):
             browser(["open", args.base_url + path])
             browser(["wait", "--text", content])
+            browser(["wait", "svg[role=img]"])
             check_page()
             if label == "case-intelligence":
                 click("Generate evidence summary")
@@ -163,6 +167,8 @@ def main():
                 check_page()
             browser(["screenshot", str(root / "artifacts" / f"production-{label}.png")])
             print(f"Underwriter {label}: loaded evidence passed.", flush=True)
+    if args.human_decision:
+        human_decision(args, state)
     if args.role == "admin":
         browser(["open", args.base_url + "/admin/graph"])
         browser(["wait", "--text", "Graph investigation"])

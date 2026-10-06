@@ -108,7 +108,7 @@ export default function NewApplicationPage() {
                   Sex
                 </Label>
                 <Select value={sex} onValueChange={setSex}>
-                  <SelectTrigger className="h-12 rounded-2xl border-white/10 bg-white/6">
+                  <SelectTrigger id="sex" className="h-12 rounded-2xl border-white/10 bg-white/6">
                     <SelectValue placeholder="Select sex" />
                   </SelectTrigger>
                   <SelectContent>

@@ -152,7 +152,7 @@ export default function RiskPage() {
                   Smoker
                 </Label>
                 <Select value={smoker} onValueChange={setSmoker}>
-                  <SelectTrigger className="h-12 rounded-2xl border-white/10 bg-white/6">
+                <SelectTrigger id="smoker" className="h-12 rounded-2xl border-white/10 bg-white/6">
                     <SelectValue placeholder="Select smoker status" />
                   </SelectTrigger>
                   <SelectContent>
@@ -168,7 +168,7 @@ export default function RiskPage() {
                   Region
                 </Label>
                 <Select value={region} onValueChange={setRegion}>
-                  <SelectTrigger className="h-12 rounded-2xl border-white/10 bg-white/6">
+                <SelectTrigger id="region" className="h-12 rounded-2xl border-white/10 bg-white/6">
                     <SelectValue placeholder="Select region" />
                   </SelectTrigger>
                   <SelectContent>
