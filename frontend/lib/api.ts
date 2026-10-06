@@ -56,12 +56,15 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
   }
 
   const controller = new AbortController()
+  const abortFromCaller = () => controller.abort()
+  requestInit.signal?.addEventListener("abort", abortFromCaller, { once: true })
+  if (requestInit.signal?.aborted) controller.abort()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const response = await fetch(
       `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
-      { ...requestInit, headers, cache: "no-store", signal: requestInit.signal ?? controller.signal },
+      { ...requestInit, headers, cache: "no-store", signal: controller.signal },
     )
 
     const usedStoredToken = !new Headers(requestInit.headers).has("Authorization")
@@ -73,6 +76,7 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
             method: "POST",
             headers: { Authorization: "Bearer " + refresh },
             cache: "no-store",
+            signal: controller.signal,
           })
           const refreshData = await refreshResponse.json().catch(() => null)
           if (refreshResponse.ok && refreshData?.access_token) {
@@ -80,11 +84,12 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
             const retryHeaders = new Headers(requestInit.headers)
             if (requestInit.body && !retryHeaders.has("Content-Type")) retryHeaders.set("Content-Type", "application/json")
             retryHeaders.set("Authorization", "Bearer " + refreshData.access_token)
-            return fetch(`${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`, {
-              ...requestInit, headers: retryHeaders, cache: "no-store",
+            return await fetch(`${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`, {
+              ...requestInit, headers: retryHeaders, cache: "no-store", signal: controller.signal,
             })
           }
-        } catch {
+        } catch (error) {
+          if (controller.signal.aborted) throw error
           // Fall through to normal session cleanup.
         }
       }
@@ -110,6 +115,7 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
     throw error
   } finally {
     clearTimeout(timeoutId)
+    requestInit.signal?.removeEventListener("abort", abortFromCaller)
   }
 }
 

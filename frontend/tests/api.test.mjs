@@ -9,21 +9,27 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
-function harness() {
+function harness(options = {}) {
   const calls = []
   const timers = []
+  const callbacks = []
   const cleared = []
   const exports = {}
   runInNewContext(compiled, {
     exports, process: { env: {} }, Headers, AbortController, DOMException,
+    ...(options.storage ? { window: {}, localStorage: {
+      getItem: (key) => options.storage[key],
+      setItem: (key, value) => { options.storage[key] = value },
+    } } : {}),
     fetch: async (url, init) => {
       calls.push({ url, init })
+      if (options.respond) return options.respond(calls.length, init)
       return new Response('{"verified":true}', { headers: { "Content-Type": "application/json" } })
     },
-    setTimeout: (callback, milliseconds) => { timers.push(milliseconds); return timers.length },
+    setTimeout: (callback, milliseconds) => { callbacks.push(callback); timers.push(milliseconds); return timers.length },
     clearTimeout: (id) => cleared.push(id),
   })
-  return { api: exports, calls, timers, cleared }
+  return { api: exports, calls, timers, cleared, callbacks }
 }
 
 test("ordinary API calls retain their 30-second deadline", async () => {
@@ -51,4 +57,51 @@ test("an explicit authorization header remains intact", async () => {
   const { api, calls } = harness()
   await api.apiFetch("/auth/refresh", { method: "POST", headers: { Authorization: "Bearer unit-test-token" } })
   assert.equal(calls[0].init.headers.get("Authorization"), "Bearer unit-test-token")
+})
+
+test("a caller signal does not bypass the request deadline", async () => {
+  const { api, calls, callbacks } = harness()
+  const caller = new AbortController()
+  await api.apiFetch("/policies", { signal: caller.signal })
+  callbacks[0]()
+  assert.equal(calls[0].init.signal.aborted, true)
+  assert.equal(caller.signal.aborted, false)
+})
+
+test("an already cancelled caller aborts the combined signal", async () => {
+  const { api, calls } = harness()
+  const caller = new AbortController()
+  caller.abort()
+  await api.apiFetch("/billing", { signal: caller.signal })
+  assert.equal(calls[0].init.signal.aborted, true)
+})
+
+test("caller cancellation reaches an in-flight request", async () => {
+  const { api, calls } = harness()
+  const caller = new AbortController()
+  const pending = api.apiFetch("/policies", { signal: caller.signal })
+  caller.abort()
+  await pending
+  assert.equal(calls[0].init.signal.aborted, true)
+})
+
+test("refresh and retry remain bounded until the retry finishes", async () => {
+  let finish
+  const { api, calls, cleared } = harness({
+    storage: { risksure_access_token: "unit-expired", risksure_refresh_token: "unit-refresh" },
+    respond: (number) => {
+      if (number === 1) return new Response("{}", { status: 401 })
+      if (number === 2) return new Response('{"access_token":"unit-refreshed"}')
+      return new Promise(resolve => { finish = () => resolve(new Response("{}")) })
+    },
+  })
+  const pending = api.apiFetch("/policies")
+  while (calls.length < 3) await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(cleared, [])
+  assert.equal(calls[0].init.signal, calls[1].init.signal)
+  assert.equal(calls[0].init.signal, calls[2].init.signal)
+  assert.equal(calls[2].init.headers.get("Authorization"), "Bearer unit-refreshed")
+  finish()
+  await pending
+  assert.deepEqual(cleared, [1])
 })

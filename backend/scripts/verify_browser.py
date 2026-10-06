@@ -150,6 +150,7 @@ def main():
     browser(["open", args.base_url + "/login"])
     browser(["eval", "localStorage.clear(); sessionStorage.clear(); true"])
     browser(["open", args.base_url + "/login"])
+    browser(["click", 'label:has(input[name="role"][value="' + args.role + '"])'])
     browser(["fill", "input[type=email]", account["email"]])
     browser(["fill", "input[type=password]", account["password"]])
     click("Sign in")

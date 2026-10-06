@@ -591,6 +591,13 @@ def login():
     if user is None or user.role not in VALID_ROLES or not user.check_password(password):
         return jsonify({"error": "Invalid email or password"}), 401
 
+    selected_role = data.get("role")
+    if selected_role is not None:
+        if not isinstance(selected_role, str) or selected_role not in VALID_ROLES:
+            return jsonify({"error": "Invalid sign-in role"}), 400
+        if selected_role != user.role:
+            return jsonify({"error": "This account does not have the selected role. Choose your assigned role."}), 403
+
     if user.role in TOTP_REQUIRED_ROLES and not user.totp_enabled:
         setup_token = create_access_token(identity=str(user.id), expires_delta=timedelta(minutes=10), additional_claims={"role": user.role, "auth_stage": "totp_setup", "token_version": user.token_version})
         return jsonify({"totp_setup_required": True, "setup_token": setup_token, "user": user.to_dict()})
@@ -1303,7 +1310,7 @@ def policy_intelligence(policy_id):
     except Exception:
         generated = None
     audit(current_user_record().id,"policy_intelligence_query","policy",p.id,{"question":q});db.session.commit()
-    return jsonify({"policy":policy_to_dict(p),"question":q,"answer":generated or " ".join(x["text"] for x in context)[:4000],"sources":context,"retrieval":"Chroma + Hugging Face" if retrieved else "RiskSure policy retrieval","indexed_chunks":indexed})
+    return jsonify({"policy":policy_to_dict(p),"question":q,"answer":generated or " ".join(x["text"] for x in context)[:4000],"sources":context,"retrieval":"Chroma + Hugging Face" if retrieved else "RiskSure policy retrieval","indexed_chunks":indexed,"ai_available":bool(generated)})
 
 @app.route("/fraud/investigation/<int:claim_id>",methods=["GET"])
 @roles_required("claims_officer","underwriter","admin")

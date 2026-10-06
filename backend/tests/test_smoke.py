@@ -35,6 +35,97 @@ def test_health(client):
     assert client.get("/health").json["status"] == "ok"
 
 
+def test_selected_login_role_does_not_grant_permissions(client, monkeypatch):
+    monkeypatch.setattr(backend.limiter, "enabled", False)
+    for role in ("customer", "underwriter", "admin"):
+        email = f"login-role-{role}@example.com"
+        with backend.app.app_context():
+            user = backend.User(email=email, role=role)
+            user.set_password("test-password-123")
+            backend.db.session.add(user)
+            backend.db.session.commit()
+        credentials = {"email": email, "password": "test-password-123"}
+        for selected in ("customer", "underwriter", "admin"):
+            response = client.post("/auth/login", json={**credentials, "role": selected})
+            if selected == role:
+                assert response.status_code == 200
+                assert response.json["user"]["role"] == role
+                assert response.json["totp_setup_required"] is True
+            else:
+                assert response.status_code == 403
+                assert not any(key.endswith("token") for key in response.json)
+        assert client.post("/auth/login", json=credentials).status_code == 200
+        assert client.post("/auth/login", json={**credentials, "role": []}).status_code == 400
+        assert client.post("/auth/login", json={**credentials, "password": "wrong", "role": "admin"}).status_code == 401
+        with backend.app.app_context():
+            assert backend.User.query.filter_by(email=email).one().role == role
+
+
+@pytest.fixture(scope="module")
+def centre_accounts(client):
+    with backend.app.app_context():
+        users = {}
+        for name, role in (("customer", "customer"), ("other", "customer"), ("admin", "admin"), ("underwriter", "underwriter")):
+            user = backend.User(email=f"centre-{name}@example.com", role=role)
+            user.set_password("test-password-123")
+            backend.db.session.add(user)
+            users[name] = user
+        backend.db.session.flush()
+        profiles = {name: backend.CustomerProfile(user_id=users[name].id, full_name="Centre Test " + name) for name in ("customer", "other")}
+        backend.db.session.add_all(profiles.values())
+        backend.db.session.flush()
+        policies = [backend.Policy(policy_number="CENTRE-CUSTOMER", customer_id=profiles["customer"].id, premium_amount=1250, terms_document="Eligibility requires human review."),
+                    backend.Policy(policy_number="CENTRE-OTHER", customer_id=profiles["other"].id, premium_amount=2500),
+                    backend.Policy(policy_number="CENTRE-INACTIVE", customer_id=profiles["customer"].id, premium_amount=500, status="cancelled")]
+        backend.db.session.add_all(policies)
+        backend.db.session.commit()
+        return {"headers": {name: {"Authorization": "Bearer " + backend.auth_token(user)} for name, user in users.items()},
+                "policies": [policy.id for policy in policies], "customers": {name: profile.id for name, profile in profiles.items()}}
+
+
+def test_billing_premiums_are_authoritative_and_scoped(client, centre_accounts):
+    headers = centre_accounts["headers"]
+    own, other, inactive = centre_accounts["policies"]
+    assert client.get("/billing", headers=headers["underwriter"]).status_code == 403
+    assert client.post("/billing", headers=headers["underwriter"], json={"policy_id": own}).status_code == 403
+    assert client.post("/billing", headers=headers["customer"], json={"policy_id": other}).status_code == 404
+    assert client.post("/billing", headers=headers["customer"], json={"policy_id": inactive}).status_code == 404
+    response = client.post("/billing", headers=headers["customer"], json={"policy_id": own, "amount": 1})
+    assert response.status_code == 201
+    assert response.json["amount"] == 1250
+    assert client.post("/billing", headers=headers["customer"], json={"policy_id": own}).status_code == 409
+    assert client.get("/billing", headers=headers["other"]).json == []
+    assert client.post("/billing", headers=headers["admin"], json={"policy_id": other}).status_code == 404
+    response = client.post("/billing", headers=headers["admin"], json={"policy_id": other, "customer_id": centre_accounts["customers"]["other"]})
+    assert response.status_code == 201
+    assert response.json["amount"] == 2500
+    transactions = client.get("/billing", headers=headers["customer"]).json
+    assert len(transactions) == 1 and transactions[0]["status"] == "pending"
+    assert len(client.get("/billing", headers=headers["admin"]).json) == 2
+
+
+def test_policy_documents_and_intelligence_are_scoped(client, centre_accounts, monkeypatch):
+    headers = centre_accounts["headers"]
+    own, other, inactive = centre_accounts["policies"]
+    listed = client.get("/policies", headers=headers["customer"]).json
+    assert {policy["id"] for policy in listed} == {own, inactive}
+    assert client.put(f"/policies/{own}/document", headers=headers["customer"], json={"document_text": "Tampered"}).status_code == 403
+    assert client.post(f"/policies/{own}/intelligence", headers=headers["other"], json={"question": "Eligibility?"}).status_code == 403
+    assert client.put(f"/policies/{own}/document", headers=headers["underwriter"], json={"document_text": ""}).status_code == 400
+    response = client.put(f"/policies/{own}/document", headers=headers["underwriter"], json={"document_text": "Eligibility requires human review.\nExclusions depend on signed terms."})
+    assert response.status_code == 200
+    monkeypatch.setattr(backend, "index_policy_chunks", lambda *args: 0)
+    monkeypatch.setattr(backend, "retrieve_policy_chunks", lambda *args: [])
+    monkeypatch.setattr(backend, "hf_request", lambda *args: None)
+    response = client.post(f"/policies/{own}/intelligence", headers=headers["customer"], json={"question": "Eligibility?"})
+    assert response.status_code == 200
+    assert response.json["ai_available"] is False
+    assert response.json["sources"] and "human review" in response.json["answer"]
+    monkeypatch.setattr(backend, "hf_request", lambda *args: "Human review is required.")
+    assert client.post(f"/policies/{own}/intelligence", headers=headers["customer"], json={"question": "Eligibility?"}).json["ai_available"] is True
+    assert client.post(f"/policies/{other}/intelligence", headers=headers["other"], json={"question": "Eligibility?"}).status_code == 400
+
+
 def test_registration_creates_customer_profile(client):
     response = client.post("/auth/register", json={
         "full_name": "Registration Test",

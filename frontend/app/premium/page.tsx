@@ -1,64 +1,112 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
+import { Loader2, Plus, RefreshCw } from "lucide-react"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { RoleGuard } from "@/components/auth/role-guard"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { useAuth } from "@/context/auth-context"
 import { apiFetch, API_ENDPOINTS } from "@/lib/api"
 
-type Policy = { id:number; policy_number:string; premium_amount:number; status:string }
+type Policy = { id: number; customer_id: number; policy_number: string; premium_amount: number; status: string }
+type Transaction = { id: number; policy_id: number | null; reference: string; transaction_type: string; amount: number; status: string }
+const money = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value || 0)
 
-export default function Page(){return <RoleGuard allowedRoles={["customer","admin"]}><B/></RoleGuard>}
+export default function Page() {
+  return <RoleGuard allowedRoles={["customer", "admin"]}><BillingCentre /></RoleGuard>
+}
 
-function B(){
-  const [a,setA]=useState<any[]>([])
-  const [policies,setPolicies]=useState<Policy[]>([])
-  const [policyId,setPolicyId]=useState("")
-  const [m,setM]=useState("")
+function BillingCentre() {
+  const { user } = useAuth()
+  const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [policies, setPolicies] = useState<Policy[]>([])
+  const [policyId, setPolicyId] = useState("")
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const selected = policies.find(policy => String(policy.id) === policyId)
+  const payable = policies.filter(policy => policy.status === "active" && policy.premium_amount > 0 &&
+    !transactions.some(transaction => transaction.policy_id === policy.id && transaction.transaction_type === "premium" && ["pending", "paid"].includes(transaction.status)))
 
-  const load=async()=>{
-    try{
-      const [billingResponse,policyResponse]=await Promise.all([
-        apiFetch(API_ENDPOINTS.billing),
-        apiFetch(API_ENDPOINTS.policies),
+  const load = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true)
+    setError("")
+    try {
+      const [billingResponse, policyResponse] = await Promise.all([
+        apiFetch(API_ENDPOINTS.billing, { signal }), apiFetch(API_ENDPOINTS.policies, { signal }),
       ])
-      const billing=await billingResponse.json().catch(()=>null)
-      const policyData=await policyResponse.json().catch(()=>null)
-      if(!billingResponse.ok)throw new Error(billing?.error||"Unable to load billing ("+billingResponse.status+")")
-      if(!policyResponse.ok)throw new Error(policyData?.error||"Unable to load policies ("+policyResponse.status+")")
-      setA(Array.isArray(billing)?billing:[])
-      setPolicies(Array.isArray(policyData)?policyData:[])
-    }catch(e){setM(e instanceof Error?e.message:"Unable to load billing")}
+      const billing = await billingResponse.json().catch(() => null)
+      const policyData = await policyResponse.json().catch(() => null)
+      if (!billingResponse.ok) throw new Error(billing?.error || "Unable to load billing")
+      if (!policyResponse.ok) throw new Error(policyData?.error || "Unable to load policies")
+      if (!Array.isArray(billing) || !Array.isArray(policyData)) throw new Error("Invalid billing response")
+      if (!signal?.aborted) { setTransactions(billing); setPolicies(policyData) }
+    } catch (caught) {
+      if (!signal?.aborted) setError(caught instanceof Error ? caught.message : "Unable to load billing")
+    } finally {
+      if (!signal?.aborted) setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void load(controller.signal)
+    return () => controller.abort()
+  }, [load])
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!selected || saving || !payable.some(policy => policy.id === selected.id)) return
+    setSaving(true)
+    setMessage("")
+    setError("")
+    try {
+      const response = await apiFetch(API_ENDPOINTS.billing, {
+        method: "POST", body: JSON.stringify({ policy_id: selected.id, ...(user?.role === "admin" ? { customer_id: selected.customer_id } : {}) }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(data?.error || "Unable to create the premium transaction")
+      if (!data?.reference) throw new Error("Invalid billing transaction response")
+      setMessage(`Pending premium recorded: ${data.reference}. Payment is not confirmed.`)
+      setPolicyId("")
+      await load()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to create the premium transaction")
+    } finally {
+      setSaving(false)
+    }
   }
 
-  useEffect(() => { load() }, [])
-
-  const create=async()=>{
-    setM("")
-    const selected=policies.find(x=>String(x.id)===policyId)
-    if(!selected){setM("Select a policy before recording a payment");return}
-    const x=await apiFetch(API_ENDPOINTS.billing,{
-      method:"POST",
-      body:JSON.stringify({policy_id:selected.id}),
-    })
-    const z=await x.json().catch(()=>null)
-    setM(x.ok?"Transaction created: "+z?.reference:z?.error||"Failed ("+x.status+")")
-    if(x.ok){setPolicyId("");load()}
-  }
-
-  return <DashboardLayout title="Billing Centre" subtitle="Premiums, transactions and payment records">
-    <section className="glass-panel rounded-[2rem] p-6">
-      <div className="flex gap-3">
-        <select value={policyId} onChange={e=>setPolicyId(e.target.value)} className="h-10 flex-1 rounded-md border bg-background px-3 text-sm">
-          <option value="">Select policy</option>
-          {policies.filter(x=>Number(x.premium_amount)>0).map(x=><option key={x.id} value={x.id}>{x.policy_number} — premium ₹{Number(x.premium_amount).toLocaleString()}</option>)}
-        </select>
-        <Input value={policyId?String(policies.find(x=>String(x.id)===policyId)?.premium_amount||""):""} readOnly placeholder="Authoritative premium"/>
-        <Button onClick={create} disabled={!policyId}>Record payment</Button>
-      </div>
-      {m&&<p className="mt-3 text-sm text-muted-foreground">{m}</p>}
-      <div className="mt-6 space-y-3">{a.map(x=><div key={x.id} className="flex justify-between rounded-2xl border border-white/10 p-4"><div><b>{x.reference}</b><p className="text-xs text-muted-foreground">{x.transaction_type}</p></div><div className="text-right"><b>{"₹"+Number(x.amount||0).toLocaleString()}</b><p className="text-xs">{x.status}</p></div></div>)}</div>
+  return <DashboardLayout title="Billing Centre" subtitle="Premiums and transaction records">
+    <section className="min-w-0">
+      <h2 className="text-xl font-semibold">Premium transaction</h2>
+      <form onSubmit={create} className="mt-5 grid items-end gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
+        <div className="min-w-0"><Label htmlFor="billing-policy">Policy</Label>
+          <select id="billing-policy" value={policyId} onChange={event => setPolicyId(event.target.value)} disabled={loading || saving} className="mt-2 h-10 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm">
+            <option value="">Select policy</option>
+            {payable.map(policy => <option key={policy.id} value={policy.id}>{policy.policy_number}</option>)}
+          </select>
+        </div>
+        <div><Label htmlFor="billing-premium">Policy premium (USD)</Label><Input id="billing-premium" className="mt-2" value={selected ? money(selected.premium_amount) : ""} readOnly placeholder="$0.00" /></div>
+        <Button type="submit" disabled={loading || saving || !selected || !payable.some(policy => policy.id === selected.id)}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}{saving ? "Recording..." : "Record pending premium"}
+        </Button>
+      </form>
+      {!loading && !error && !payable.length && <p className="mt-3 text-sm text-muted-foreground">No active policies with an unrecorded premium.</p>}
+      {message && <p role="status" className="mt-3 break-words text-sm text-primary">{message}</p>}
+      {error && <p role="alert" className="mt-3 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+      <div className="mt-8 flex items-center justify-between gap-3 border-t border-border pt-5"><h2 className="text-xl font-semibold">Transactions</h2><Button variant="ghost" size="icon" title="Refresh transactions" aria-label="Refresh transactions" onClick={() => void load()} disabled={loading || saving}><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></Button></div>
+      {loading ? <p role="status" className="mt-4 text-sm text-muted-foreground">Loading transactions...</p> :
+        <div className="mt-4 space-y-3">
+          {transactions.map(transaction => <article key={transaction.id} className="flex flex-wrap justify-between gap-3 rounded-lg border border-border p-4">
+            <div className="min-w-0"><h3 className="break-all text-sm font-semibold">{transaction.reference}</h3><p className="mt-1 text-xs text-muted-foreground">{policies.find(policy => policy.id === transaction.policy_id)?.policy_number || "Unlinked transaction"} | {transaction.transaction_type}</p></div>
+            <div className="text-right"><b className="text-sm">{money(transaction.amount)}</b><p className="mt-1 text-xs capitalize">{transaction.status}</p></div>
+          </article>)}
+          {!transactions.length && !error && <p className="text-sm text-muted-foreground">No transactions recorded.</p>}
+        </div>}
     </section>
   </DashboardLayout>
 }

@@ -64,9 +64,9 @@ def request(base_url, method, path, expected=200, token=None, **kwargs):
     return response.json()
 
 
-def login(base_url, account):
+def login(base_url, account, role=None):
     result = request(base_url, "POST", "/auth/login", json={
-        "email": account["email"], "password": account["password"]})
+        "email": account["email"], "password": account["password"], "role": role})
     if result.get("totp_setup_required"):
         secret = request(base_url, "POST", "/auth/totp/setup", token=result["setup_token"])["secret"]
         result = request(base_url, "POST", "/auth/totp/verify-setup", token=result["setup_token"],

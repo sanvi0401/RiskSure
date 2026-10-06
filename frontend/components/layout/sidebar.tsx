@@ -16,7 +16,7 @@ const navItems: { href: string; label: string; icon: typeof LayoutDashboard; rol
   { href: "/underwriting", label: "Underwriting", icon: Scale, roles: ["underwriter","admin"] },
   { href: "/claims", label: "Claims Centre", icon: ClipboardList, roles: ["claims_officer","admin"] },
   { href: "/provider", label: "Provider Portal", icon: Network, roles: ["provider","admin"] },
-  { href: "/premium", label: "Billing Centre", icon: Calculator, roles: ["customer","underwriter","admin"] },
+  { href: "/premium", label: "Billing Centre", icon: Calculator, roles: ["customer","admin"] },
   { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter","claims_officer","admin"] },
   { href: "/fraud", label: "Fraud Investigation", icon: Network, roles: ["underwriter","claims_officer","admin"] },
   { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","claims_officer","admin"] },
