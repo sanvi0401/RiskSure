@@ -1,6 +1,7 @@
 """Exercise production roles with clearly labelled verification accounts."""
 import argparse
 import json
+import os
 from pathlib import Path
 import secrets
 import sys
@@ -15,32 +16,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def prepare(env_file, state_path):
     load_dotenv(env_file)
-    import app as backend
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
+    from models import AuditLog, CustomerProfile, User
+    url = make_url((os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or "").replace(
+        "postgres://", "postgresql://", 1)).set(drivername="postgresql+psycopg")
+    engine = create_engine(url, connect_args={"connect_timeout": 10})
     state = {"accounts": {}}
     suffix = secrets.token_hex(5)
-    with backend.app.app_context():
-        backend.ensure_schema()
+    print("Creating release-verification accounts in configured PostgreSQL.", flush=True)
+    with Session(engine) as session, session.begin():
         for name, role in (("customer", "customer"), ("underwriter", "underwriter"),
                            ("other_underwriter", "underwriter"), ("admin", "admin")):
             email = f"release-{name}-{suffix}@example.invalid"
             password = secrets.token_urlsafe(24)
-            user = backend.User(email=email, role=role)
+            user = User(email=email, role=role)
             user.set_password(password)
-            backend.db.session.add(user)
-            backend.db.session.flush()
+            session.add(user)
+            session.flush()
             if role == "customer":
-                backend.db.session.add(backend.CustomerProfile(user_id=user.id,
+                session.add(CustomerProfile(user_id=user.id,
                     full_name="RiskSure Release Verification"))
-            backend.audit(user.id, "release_verification_account_created", "user", user.id)
+            session.add(AuditLog(user_id=user.id, action="release_verification_account_created",
+                                 entity_type="user", entity_id=user.id))
             state["accounts"][name] = {"email": email, "password": password, "id": user.id}
-        backend.db.session.commit()
+    engine.dispose()
     save_state(state_path, state)
     print("Prepared isolated release-verification accounts; credentials stored only in ignored artifacts.", flush=True)
 
 
 def save_state(path, state):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2))
+    existing = json.loads(path.read_text()) if path.exists() else {}
+    merged = {**existing, **state}
+    merged["accounts"] = {**existing.get("accounts", {}), **state.get("accounts", {})}
+    path.write_text(json.dumps(merged, indent=2))
 
 
 def request(base_url, method, path, expected=200, token=None, **kwargs):
@@ -104,6 +115,7 @@ def verify(base_url, state_path):
     ai = request(base_url, "POST", f"/cases/{application_id}/assistant", token=underwriter,
                  json={"question": "Summarize supplied risk evidence and identify missing policy evidence."})
     assert ai["human_decision_required"] is True
+    assert ai["available"] and ai.get("summary"), "The real AI provider returned no interpretation"
     print(f"AI available: {ai['available']}; human decision required: true", flush=True)
     if not state.get("decision_verified"):
         request(base_url, "PUT", f"/underwriting/applications/{application_id}/decision", token=underwriter,
@@ -128,10 +140,32 @@ def verify(base_url, state_path):
     system_graph = request(base_url, "GET", "/admin/graph", token=admin)
     print(f"Admin graph source: {system_graph['source']}; nodes: {len(system_graph['nodes'])}", flush=True)
     state["verification"] = {"base_url": base_url, "verified_at": int(time.time()),
-                              "neo4j": graph["source"] == "neo4j" and system_graph["source"] == "neo4j",
+                              "neo4j": graph["source"] == "neo4j" and system_graph["source"] in ("neo4j", "neo4j+postgres"),
                               "ai": ai["available"], "policy_retrieval": bool(evidence["policy_evidence"])}
     save_state(state_path, state)
     print(json.dumps(state["verification"], indent=2))
+
+
+def verify_graphs(base_url, state_path):
+    state = json.loads(state_path.read_text())
+    for name in ("customer", "underwriter", "other_underwriter", "admin"):
+        login(base_url, state["accounts"][name])
+        save_state(state_path, state)
+    application_id = state["application_id"]
+    tokens = {name: account["token"] for name, account in state["accounts"].items() if "token" in account}
+    path = f"/graph?application_id={application_id}"
+    request(base_url, "GET", path, expected=403, token=tokens["customer"])
+    request(base_url, "GET", path, expected=403, token=tokens["other_underwriter"])
+    scoped = request(base_url, "GET", path, token=tokens["underwriter"])
+    system = request(base_url, "GET", "/admin/graph", token=tokens["admin"])
+    for name, graph in (("underwriter", scoped), ("admin", system)):
+        print(json.dumps({name: {"source": graph["source"], "nodes": len(graph["nodes"]),
+                                "relationships": sorted({edge["relationship"] for edge in graph["edges"]})}}), flush=True)
+    verified = scoped["source"] == "neo4j" and system["source"] in ("neo4j", "neo4j+postgres")
+    state.setdefault("verification", {})["neo4j"] = verified
+    save_state(state_path, state)
+    if not verified:
+        raise RuntimeError("Live graph verification still uses PostgreSQL fallback")
 
 
 if __name__ == "__main__":
@@ -140,8 +174,12 @@ if __name__ == "__main__":
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--base-url")
+    parser.add_argument("--graphs-only", action="store_true")
     args = parser.parse_args()
     if args.prepare:
         prepare(args.env_file, args.state)
     if args.base_url:
-        verify(args.base_url, args.state)
+        if args.graphs_only:
+            verify_graphs(args.base_url, args.state)
+        else:
+            verify(args.base_url, args.state)

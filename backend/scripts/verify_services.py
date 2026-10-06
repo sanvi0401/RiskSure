@@ -100,8 +100,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--model")
+    parser.add_argument("--certifi-ca", action="store_true")
     args = parser.parse_args()
     load_dotenv(args.env_file, override=False)
+    if args.certifi_ca:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
     if args.model:
         os.environ["HUGGINGFACE_MODEL"] = args.model
     with ThreadPoolExecutor(max_workers=4) as pool:

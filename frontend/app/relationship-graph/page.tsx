@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { apiFetch, API_ENDPOINTS } from "@/lib/api"
 import { useAuth } from "@/context/auth-context"
@@ -22,8 +22,11 @@ function RelationshipGraphPageContent() {
   const [error, setError] = useState("")
   const [applicationId, setApplicationId] = useState("")
   const [expanding, setExpanding] = useState(false)
+  const requestId = useRef(0)
 
   const load = useCallback(async (expandNodeId?: string) => {
+    if (!user?.role) return
+    const currentRequest = ++requestId.current
     setLoading(true)
     setError("")
     try {
@@ -39,13 +42,19 @@ function RelationshipGraphPageContent() {
       const suffix = query.size ? `?${query.toString()}` : ""
       const response = await apiFetch(`${endpoint}${suffix}`)
       const data = await response.json().catch(() => null)
+      if (currentRequest !== requestId.current) return
       if (!response.ok) throw new Error(data?.error || "Unable to load relationship graph")
+      setError("")
       setGraph(data as RelationshipGraph)
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load relationship graph")
+      if (currentRequest === requestId.current) {
+        setError(loadError instanceof Error ? loadError.message : "Unable to load relationship graph")
+      }
     } finally {
-      setLoading(false)
-      setExpanding(false)
+      if (currentRequest === requestId.current) {
+        setLoading(false)
+        setExpanding(false)
+      }
     }
   }, [applicationId, user?.role])
 
@@ -55,6 +64,7 @@ function RelationshipGraphPageContent() {
     }
   }, [])
   useEffect(() => {
+    if (!user?.role) return
     if (user?.role !== "underwriter" || applicationId) void load()
     else if (user?.role) {
       setLoading(false)

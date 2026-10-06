@@ -229,10 +229,10 @@ export default function RiskPage() {
                 </div>
 
                 <Button
-                  onClick={() => router.push("/underwriting")}
+                  onClick={() => router.push("/final")}
                   className="mt-6 h-12 w-full rounded-2xl bg-primary text-primary-foreground shadow-[0_18px_45px_rgba(141,240,207,0.18)] hover:bg-primary/90"
                 >
-                  Proceed to Underwriting
+                  Review Application
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </div>

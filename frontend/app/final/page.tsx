@@ -54,13 +54,13 @@ export default function FinalPage() {
 
   if (isSaved) {
     return (
-      <DashboardLayout title="Application Saved" subtitle="Redirecting to dashboard">
+      <DashboardLayout title="Application Submitted" subtitle="Pending human underwriting review">
         <div className="mx-auto max-w-3xl">
           <div className="glass-panel flex flex-col items-center justify-center rounded-[2rem] p-16">
             <div className="flex h-20 w-20 items-center justify-center rounded-full bg-secondary">
               <CheckCircle className="h-10 w-10 text-primary" />
             </div>
-            <h2 className="mt-6 text-2xl font-bold text-foreground">Application Saved Successfully!</h2>
+            <h2 className="mt-6 text-2xl font-bold text-foreground">Application Submitted Successfully!</h2>
             <p className="mt-2 text-muted-foreground">Redirecting to dashboard...</p>
           </div>
         </div>
@@ -69,7 +69,7 @@ export default function FinalPage() {
   }
 
   return (
-    <DashboardLayout title="Final Review" subtitle="Review and save the application">
+    <DashboardLayout title="Final Review" subtitle="Review and submit the application">
       <div className="mx-auto max-w-3xl">
         <div className="glass-panel rounded-[2rem] p-8">
           <h2 className="mb-6 text-2xl font-semibold tracking-[-0.04em] text-foreground">Application Summary</h2>
@@ -138,17 +138,17 @@ export default function FinalPage() {
 
           <div className="mb-8 rounded-[1.5rem] border border-white/8 bg-white/4">
             <div className="border-b border-white/8 bg-white/5 px-4 py-3">
-              <h3 className="font-semibold text-foreground">Decision & Premium</h3>
+              <h3 className="font-semibold text-foreground">Risk Recommendation & Estimate</h3>
             </div>
             <div className="flex items-center justify-between p-4">
               <div>
-                <p className="text-sm text-muted-foreground">Underwriting Decision</p>
+                <p className="text-sm text-muted-foreground">Risk Recommendation</p>
                 <div className="mt-2">
                   <StatusBadge status={applicationData.decision} className="px-3 py-1" />
                 </div>
               </div>
               <div className="text-right">
-                <p className="text-sm text-muted-foreground">Final Premium</p>
+                <p className="text-sm text-muted-foreground">Estimated Premium</p>
                 <p className="mt-1 text-3xl font-bold text-primary">
                   ${applicationData.premium.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
@@ -160,11 +160,11 @@ export default function FinalPage() {
           <div className="flex justify-between">
             <Button
               variant="outline"
-              onClick={() => router.push("/premium")}
+              onClick={() => router.push("/risk")}
               className="h-11 rounded-2xl border-white/10 bg-white/5"
             >
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Premium
+              Back to Risk
             </Button>
 
             <Button
@@ -180,7 +180,7 @@ export default function FinalPage() {
               ) : (
                 <>
                   <Save className="mr-2 h-4 w-4" />
-                  Save Application
+                  Submit Application
                 </>
               )}
             </Button>

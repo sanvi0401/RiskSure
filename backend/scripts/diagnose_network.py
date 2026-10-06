@@ -2,12 +2,16 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 import os
 import socket
+import ssl
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 import requests
+
+from verify_services import redact
 
 
 def dns_probe(resolver, hostname):
@@ -19,6 +23,36 @@ def dns_probe(resolver, hostname):
                 "dns_status": body.get("Status"), "answer_count": len(body.get("Answer", []))}
     except Exception as error:
         return {"resolver": urlsplit(resolver).hostname, "error_type": type(error).__name__}
+
+
+def tls_probe(hostname, port, cafile=None):
+    try:
+        with socket.create_connection((hostname, port), timeout=10) as connection:
+            with ssl.create_default_context(cafile=cafile).wrap_socket(connection, server_hostname=hostname) as secured:
+                return {"port": port, "status": "pass", "tls_version": secured.version()}
+    except Exception as error:
+        return {"port": port, "status": "fail", "error_type": type(error).__name__,
+                "detail": redact(str(error))}
+
+
+def direct_bolt_probe(hostname):
+    from neo4j import GraphDatabase
+    logging.getLogger("neo4j").setLevel(logging.CRITICAL)
+    try:
+        with GraphDatabase.driver("bolt+s://" + hostname,
+                auth=(os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD")),
+                connection_timeout=10, connection_acquisition_timeout=15) as driver:
+            with driver.session(database=os.getenv("NEO4J_DATABASE") or "neo4j") as session:
+                result = session.run("RETURN 1 AS verified").single()
+                return {"status": "pass" if result["verified"] == 1 else "fail"}
+    except Exception as error:
+        details = []
+        seen = set()
+        while error is not None and id(error) not in seen:
+            seen.add(id(error))
+            details.append({"error_type": type(error).__name__, "detail": redact(str(error))})
+            error = error.__cause__ or error.__context__
+        return {"status": "fail", "causes": details}
 
 
 def main():
@@ -43,6 +77,11 @@ def main():
         print(json.dumps({"system_dns": "pass"}), flush=True)
     except OSError as error:
         print(json.dumps({"system_dns": "fail", "error_code": error.errno}), flush=True)
+    for port in (7687, 443):
+        print(json.dumps({"aura_tls": tls_probe(hostname, port)}), flush=True)
+    import certifi
+    print(json.dumps({"aura_certifi_tls": tls_probe(hostname, 7687, certifi.where())}), flush=True)
+    print(json.dumps({"aura_direct_bolt": direct_bolt_probe(hostname)}), flush=True)
     try:
         response = requests.get("https://router.huggingface.co/v1/models", timeout=20)
         models = [entry.get("id") for entry in response.json().get("data", [])]
