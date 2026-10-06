@@ -11,19 +11,34 @@ import pyotp
 import requests
 
 
-def browser(arguments):
+def browser(arguments, capture_output=True):
     executable = shutil.which("npx.cmd") or shutil.which("npx")
-    result = subprocess.run([executable, "--yes", "agent-browser", *arguments],
-                            text=True, capture_output=True)
+    output = {"capture_output": True} if capture_output else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    try:
+        result = subprocess.run([executable, "--yes", "agent-browser", *arguments],
+                                text=True, timeout=90, **output)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Browser action timed out: {arguments[0]}") from None
     if result.returncode:
         raise RuntimeError(f"Browser action failed: {arguments[0]}")
-    return result.stdout.strip()
+    return result.stdout.strip() if capture_output else ""
 
 
 def click(name):
     browser(["eval", "Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === "
              + json.dumps(name) + ")?.scrollIntoView({block:'center'}); true"])
     browser(["find", "role", "button", "click", "--name", name, "--exact"])
+
+
+def fill_multiline(selector, value):
+    # Windows command shims truncate literal newlines; enter them as keystrokes.
+    lines = value.split("\n")
+    browser(["fill", selector, lines[0]])
+    for line in lines[1:]:
+        browser(["press", "Control+End"])
+        browser(["press", "Enter"])
+        if line:
+            browser(["type", selector, line])
 
 
 def wait_path(path):
@@ -147,7 +162,8 @@ def main():
             raise RuntimeError(f"Browser verification registration failed: {response.status_code}")
         state["accounts"]["browser_customer"] = account
         args.state.write_text(json.dumps(state, indent=2))
-    browser(["open", args.base_url + "/login"])
+    # A new Windows daemon inherits output handles; do not give startup a pipe.
+    browser(["open", args.base_url + "/login"], capture_output=False)
     browser(["eval", "localStorage.clear(); sessionStorage.clear(); true"])
     browser(["open", args.base_url + "/login"])
     browser(["click", 'label:has(input[name="role"][value="' + args.role + '"])'])

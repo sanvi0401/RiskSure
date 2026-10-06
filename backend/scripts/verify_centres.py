@@ -6,7 +6,7 @@ import time
 
 import pyotp
 
-from verify_browser import browser, check_page, click, wait_path
+from verify_browser import browser, check_page, click, fill_multiline, wait_path
 from verify_live import login, request, save_state
 
 
@@ -39,7 +39,7 @@ def ui_login(base, account, role):
 def choose_policy(policy):
     selector = "Array.from(document.querySelectorAll('main button')).find(b => b.textContent.includes(" + json.dumps(policy["policy_number"]) + "))"
     browser(["wait", "--fn", selector + " !== undefined"])
-    browser(["eval", "(() => {const b=" + selector + "; b.id='centre-policy'; b.scrollIntoView({block:'center'}); return true;})()"])
+    browser(["eval", "(() => {document.querySelector('#centre-policy')?.removeAttribute('id'); const b=" + selector + "; b.id='centre-policy'; b.scrollIntoView({block:'center'}); return true;})()"])
     browser(["click", "#centre-policy"])
     browser(["wait", "#policy-question"])
 
@@ -110,7 +110,7 @@ def verify(args):
     request(api, "POST", "/billing", expected=404, token=customer["token"], json={"policy_id": other_policy["id"]})
     request(api, "GET", "/billing", expected=403, token=underwriter["token"])
 
-    browser(["set", "viewport", "1280", "900"])
+    browser(["set", "viewport", "1280", "900"], capture_output=False)
     browser(["open", args.base_url + "/login"])
     browser(["eval", "localStorage.clear(); sessionStorage.clear(); true"])
     browser(["open", args.base_url + "/login"])
@@ -135,7 +135,7 @@ def verify(args):
     choose_policy(policy)
     browser(["wait", "#policy-document"])
     document = policy["terms_document"] + "\nCentre verification: this is an isolated test policy, not a customer contract."
-    browser(["fill", "#policy-document", document])
+    fill_multiline("#policy-document", document)
     click("Save document")
     browser(["wait", "--text", "Policy document saved."])
     layout_check()
@@ -176,6 +176,10 @@ def verify(args):
     transactions = request(api, "GET", "/billing", token=admin["token"])
     fixture_ids = {row["id"] for row in transactions if row["policy_id"] in (policy["id"], other_policy["id"])}
     assert fixture_ids <= {row["entity_id"] for row in audit}
+    customer_rows = request(api, "GET", "/billing", token=customer["token"])
+    other_rows = request(api, "GET", "/billing", token=accounts["browser_customer"]["token"])
+    assert all(row["policy_id"] == policy["id"] for row in customer_rows)
+    assert all(row["policy_id"] == other_policy["id"] for row in other_rows)
     state.setdefault("verification", {}).update({"login_three_roles": True, "billing_centres": True, "policy_centres": True})
     save_state(args.state, state)
     print("Admin: both centres, policy-switch state reset and persisted billing audit records passed.", flush=True)
