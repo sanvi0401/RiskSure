@@ -29,7 +29,9 @@ def screenshot(root, name):
 def sign_out(api, role, root):
     access = evaluate("localStorage.getItem('risksure_access_token')")
     refresh = evaluate("localStorage.getItem('risksure_refresh_token')")
-    click("Sign out")
+    references = json.loads(browser(["snapshot", "-i", "--json"]))["data"]["refs"]
+    reference = next(key for key, item in references.items() if item["role"] == "button" and item["name"] == "Sign out")
+    browser(["click", "@" + reference])
     wait_path("/signed-out")
     browser(["wait", "--text", "Thank you"])
     browser(["wait", "a[href='/login']"])
@@ -77,7 +79,9 @@ def verify_sign_outs(args):
         if role == "underwriter":
             link("Final Review")
             wait_path("/final")
+            browser(["wait", "--text", "Application Summary"])
             assert not evaluate("document.querySelector('main').textContent.includes('Discarded private sign-out draft')")
+            assert evaluate("JSON.parse(sessionStorage.getItem('risksure_application_draft')).name") == ""
             screenshot(root, "workflow-draft-cleared-across-sessions")
             print("In-memory application draft was cleared across SPA sign-out and the next role login.", flush=True)
         if role == "admin":

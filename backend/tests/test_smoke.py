@@ -174,10 +174,13 @@ def test_underwriting_flow(client, session, monkeypatch):
         underwriter.set_password("test-password-123")
         admin = backend.User(email="workflow-admin@example.com", role="admin")
         admin.set_password("test-password-123")
-        backend.db.session.add_all([underwriter, admin])
+        other_underwriter = backend.User(email="workflow-other-underwriter@example.com", role="underwriter")
+        other_underwriter.set_password("test-password-123")
+        backend.db.session.add_all([underwriter, admin, other_underwriter])
         backend.db.session.commit()
         underwriter_token = backend.auth_token(underwriter)
         admin_token = backend.auth_token(admin)
+        other_underwriter_token = backend.auth_token(other_underwriter)
     underwriter_headers = {"Authorization": "Bearer " + underwriter_token}
     admin_headers = {"Authorization": "Bearer " + admin_token}
     overview = client.get("/admin/overview", headers=admin_headers)
@@ -227,6 +230,7 @@ def test_underwriting_flow(client, session, monkeypatch):
     assert completed["review_status"] == "completed"
     assert completed["decision"] == "Approved with Conditions"
     assert client.put(f"/underwriting/applications/{application_id}/assign", headers=underwriter_headers, json={}).status_code == 409
+    assert client.put(f"/underwriting/applications/{application_id}/assign", headers={"Authorization": "Bearer " + other_underwriter_token}, json={}).status_code == 403
     assert client.put(f"/underwriting/applications/{application_id}/decision", headers=underwriter_headers, json={"decision": "Rejected", "reason": "Overwrite attempt"}).status_code == 409
     assert client.get(f"/applications/{application_id}", headers=headers).json["review_status"] == "completed"
     completed_overview = client.get("/admin/overview", headers=admin_headers).json

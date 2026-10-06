@@ -848,10 +848,10 @@ def assign_underwriting(application_id):
     application = db.session.get(Application, application_id)
     if application is None:
         return jsonify({"error": "Application not found"}), 404
-    if application.review_status == "completed":
-        return jsonify({"error": "A completed underwriting case cannot be reassigned or reopened"}), 409
     if user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
         return jsonify({"error": "Application is assigned to another underwriter"}), 403
+    if application.review_status == "completed":
+        return jsonify({"error": "A completed underwriting case cannot be reassigned or reopened"}), 409
     data = request.get_json(silent=True) or {}
     try:
         assignee_id = int(data.get("underwriter_id", user.id))
