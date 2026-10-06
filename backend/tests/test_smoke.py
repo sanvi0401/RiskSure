@@ -88,6 +88,10 @@ def test_underwriting_flow(client, session, monkeypatch):
         underwriter_token = backend.auth_token(underwriter)
         admin_token = backend.auth_token(admin)
     underwriter_headers = {"Authorization": "Bearer " + underwriter_token}
+    admin_headers = {"Authorization": "Bearer " + admin_token}
+    overview = client.get("/admin/overview", headers=admin_headers)
+    assert overview.status_code == 200
+    assert overview.json["approved_applications"] == 0
     assigned = client.put(f"/underwriting/applications/{application_id}/assign", headers=underwriter_headers, json={})
     assert assigned.status_code == 200, assigned.json
 
@@ -126,6 +130,7 @@ def test_underwriting_flow(client, session, monkeypatch):
     completed = next(item for item in customer_applications if item["id"] == application_id)
     assert completed["review_status"] == "completed"
     assert completed["decision"] == "Approved with Conditions"
+    assert client.get("/admin/overview", headers=admin_headers).json["approved_applications"] == 1
     with backend.app.app_context():
         policy = backend.Policy.query.filter_by(application_id=application_id).one()
         assert policy.customer_id == completed["customer_id"]
@@ -139,6 +144,7 @@ def test_underwriting_flow(client, session, monkeypatch):
     tampered = client.post("/save", headers=headers, json={"name":"Tampered", **APPLICANT, "risk_score":0,"final_risk":0,"decision":"Approved","premium":1,"rule_adjustment":0})
     assert tampered.status_code == 200
     assert tampered.json["application"]["decision"] != "Approved" or tampered.json["application"]["premium"] != 1
+    assert client.get("/admin/overview", headers=admin_headers).json["approved_applications"] == 1
 
 
 @pytest.mark.skipif(not backend.model_loaded, reason="xgboost native library unavailable")
