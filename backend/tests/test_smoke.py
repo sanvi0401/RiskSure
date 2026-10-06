@@ -1,9 +1,8 @@
 """End-to-end smoke tests. Run from backend/: python -m pytest tests"""
 import os
-import tempfile
 from datetime import datetime, timezone
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(), "test.db"))
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-that-is-long-enough")
 
 import pyotp  # noqa: E402
@@ -127,6 +126,9 @@ def test_underwriting_flow(client, session, monkeypatch):
     completed = next(item for item in customer_applications if item["id"] == application_id)
     assert completed["review_status"] == "completed"
     assert completed["decision"] == "Approved with Conditions"
+    with backend.app.app_context():
+        policy = backend.Policy.query.filter_by(application_id=application_id).one()
+        assert policy.customer_id == completed["customer_id"]
     admin_audit = client.get(
         "/admin/audit-logs?action=underwriting_decision",
         headers={"Authorization": "Bearer " + admin_token},
@@ -266,6 +268,7 @@ def test_application_and_admin_graph_authorization(client, monkeypatch):
         )
         backend.db.session.add_all([application_a, application_b, restricted_related_application])
         backend.db.session.flush()
+        policy_a.application_id = application_a.id
         claim = backend.Claim(
             claim_number="GRAPH-CLAIM-A",
             customer_id=profile_a.id,
@@ -290,6 +293,7 @@ def test_application_and_admin_graph_authorization(client, monkeypatch):
         provider_token = backend.auth_token(provider_user_a)
         officer_token = backend.auth_token(officer_a)
         app_a_id, app_b_id = application_a.id, application_b.id
+        underwriter_a_id = underwriter_a.id
         restricted_related_id = restricted_related_application.id
         claim_a_id, claim_b_id = claim.id, other_provider_claim.id
 
@@ -299,11 +303,14 @@ def test_application_and_admin_graph_authorization(client, monkeypatch):
     provider_headers = {"Authorization": f"Bearer {provider_token}"}
     officer_headers = {"Authorization": f"Bearer {officer_token}"}
 
+    assert client.get(f"/applications/{app_a_id}", headers=customer_headers).status_code == 200
+    assert client.get(f"/applications/{app_a_id}/risk-analysis", headers=customer_headers).status_code == 200
     assert client.get(f"/applications/{app_b_id}", headers=customer_headers).status_code == 403
     assert client.get(f"/applications/{app_b_id}/risk-analysis", headers=customer_headers).status_code == 403
     assert client.get("/graph", headers=customer_headers).status_code == 403
     assert client.get("/admin/audit-logs", headers=customer_headers).status_code == 403
 
+    assert client.get(f"/applications/{app_a_id}", headers=underwriter_headers).status_code == 200
     assert client.get(f"/applications/{app_b_id}", headers=underwriter_headers).status_code == 403
     assert all(
         application["id"] != app_b_id
@@ -320,15 +327,26 @@ def test_application_and_admin_graph_authorization(client, monkeypatch):
     assert client.get("/admin/audit-logs", headers=underwriter_headers).status_code == 403
     assign = client.put(f"/underwriting/applications/{app_b_id}/assign", headers=underwriter_headers, json={})
     assert assign.status_code == 403, assign.json
+    decision = client.put(
+        f"/underwriting/applications/{app_b_id}/decision",
+        headers=underwriter_headers,
+        json={"decision": "Rejected", "reason": "Unauthorized decision attempt."},
+    )
+    assert decision.status_code == 403, decision.json
 
     scoped = client.get(f"/graph?application_id={app_a_id}", headers=underwriter_headers)
     assert scoped.status_code == 200, scoped.json
     graph = scoped.json
+    graph_edges = {(edge["source"], edge["relationship"], edge["target"]) for edge in graph["edges"]}
     assert any(node["type"] == "riskfactor" for node in graph["nodes"])
     assert any(node["type"] == "decision" for node in graph["nodes"])
     assert any(node["type"] == "claim" for node in graph["nodes"])
     assert any(node["type"] == "policy" for node in graph["nodes"])
     assert any(node["type"] == "provider" for node in graph["nodes"])
+    assert (f"application-{app_a_id}", "reviewed_by", f"underwriter-{underwriter_a_id}") in graph_edges
+    assert any(source == f"application-{app_a_id}" and rel == "has_policy" for source, rel, _ in graph_edges)
+    assert any(source == f"application-{app_a_id}" and rel == "has_claim" for source, rel, _ in graph_edges)
+    assert any(source == f"claim-{claim_a_id}" and rel == "associated_with" for source, rel, _ in graph_edges)
     assert all(node["id"] != f"application-{restricted_related_id}" for node in graph["nodes"])
 
     def scoped_claim_graph(claim_id, allowed_claim_ids=None):
@@ -352,9 +370,13 @@ def test_application_and_admin_graph_authorization(client, monkeypatch):
     assert all(node["id"] != f"claim-{claim_b_id}" for node in officer_graph.json["nodes"])
 
     assert client.get(f"/graph?application_id={app_a_id}", headers=admin_headers).status_code == 200
+    assert client.get("/admin/users", headers=admin_headers).status_code == 200
     admin_graph = client.get("/admin/graph", headers=admin_headers)
     assert admin_graph.status_code == 200, admin_graph.json
     assert any(node["id"] == f"application-{app_b_id}" for node in admin_graph.json["nodes"])
+    admin_edges = {(edge["source"], edge["relationship"], edge["target"]) for edge in admin_graph.json["edges"]}
+    assert any(source == f"application-{app_a_id}" and rel == "has_policy" for source, rel, _ in admin_edges)
+    assert any(source == f"application-{app_a_id}" and rel == "has_claim" for source, rel, _ in admin_edges)
     expanded = client.get(f"/admin/graph?expand_node_id=application-{app_a_id}", headers=admin_headers)
     assert expanded.status_code == 200
     assert any(node["id"] == f"application-{app_a_id}" for node in expanded.json["nodes"])

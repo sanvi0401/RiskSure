@@ -158,6 +158,19 @@ _WIDENED_COLUMNS = (
 def ensure_schema():
     """Create missing tables and apply small additive compatibility changes."""
     db.create_all()
+    try:
+        with db.engine.begin() as connection:
+            if db.engine.dialect.name == "postgresql":
+                connection.execute(sql_text("ALTER TABLE policies ADD COLUMN IF NOT EXISTS application_id INTEGER"))
+            else:
+                connection.execute(sql_text("ALTER TABLE policies ADD COLUMN application_id INTEGER"))
+    except Exception:
+        pass
+    try:
+        with db.engine.begin() as connection:
+            connection.execute(sql_text("CREATE INDEX IF NOT EXISTS ix_policies_application_id ON policies (application_id)"))
+    except Exception:
+        pass
     if db.engine.dialect.name == "postgresql":
         with db.engine.begin() as connection:
             for statement in _WIDENED_COLUMNS:
@@ -879,6 +892,7 @@ def underwriting_decision(application_id):
             policy = Policy(
                 policy_number=f"RS-POL-{os.urandom(5).hex().upper()}",
                 customer_id=application.customer_id,
+                application_id=application.id,
                 policy_type="health",
                 status="active",
                 coverage_limit=100000.0,
@@ -891,6 +905,8 @@ def underwriting_decision(application_id):
             db.session.flush()
             policy_id = policy.id
         else:
+            if existing.application_id is None:
+                existing.application_id = application.id
             policy_id = existing.id
     audit(user.id, "underwriting_decision", "application", application.id, {"decision": decision, "reason": reason, "policy_id": policy_id})
     db.session.commit()
@@ -900,6 +916,7 @@ def underwriting_decision(application_id):
         if associated_policy is not None:
             neo4j_link_application_policy(application.id, {
                 "policy_id": associated_policy.id,
+                "customer_id": associated_policy.customer_id,
                 "policy_number": associated_policy.policy_number,
                 "status": associated_policy.status,
                 "policy_type": associated_policy.policy_type,
@@ -1234,7 +1251,7 @@ def admin_overview():
 
 
 def policy_to_dict(policy):
-    return {"id":policy.id,"policy_number":policy.policy_number,"customer_id":policy.customer_id,"provider_id":policy.provider_id,"policy_type":policy.policy_type,"status":policy.status,"coverage_limit":policy.coverage_limit,"premium_amount":policy.premium_amount,"start_date":policy.start_date.isoformat() if policy.start_date else None,"end_date":policy.end_date.isoformat() if policy.end_date else None,"terms_document":policy.terms_document}
+    return {"id":policy.id,"policy_number":policy.policy_number,"customer_id":policy.customer_id,"application_id":policy.application_id,"provider_id":policy.provider_id,"policy_type":policy.policy_type,"status":policy.status,"coverage_limit":policy.coverage_limit,"premium_amount":policy.premium_amount,"start_date":policy.start_date.isoformat() if policy.start_date else None,"end_date":policy.end_date.isoformat() if policy.end_date else None,"terms_document":policy.terms_document}
 
 @app.route("/policies",methods=["GET"])
 @roles_required("customer","admin","underwriter","claims_officer","provider")
@@ -1303,13 +1320,13 @@ def fraud_investigation(claim_id):
     score=min(1.0,.2*len(signals)+.05*max(0,len(related)-1))
     audit(current_user_record().id,"fraud_investigation_viewed","claim",c.id,{"anomaly_score":score});db.session.commit()
     try:
-        neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id})
+        neo4j_upsert_claim({"customer_id":c.customer_id,"claim_id":c.id,"claim_number":c.claim_number,"amount":c.claimed_amount,"status":c.status,"provider_id":c.provider_id,"policy_id":c.policy_id,"application_id":getattr(c.policy,"application_id",None) if c.policy else None})
         graph_from_neo4j=neo4j_claim_graph(c.id, allowed_claim_ids=[claim.id for claim in related])
     except Exception:
         graph_from_neo4j={"nodes":[],"edges":[]}
     nodes=graph_from_neo4j["nodes"] or [{"id":"customer-"+str(c.customer_id),"type":"customer"},{"id":"claim-"+str(c.id),"type":"claim"}]
-    edges=graph_from_neo4j["edges"] or [{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"submitted"}]
-    if c.provider_id:nodes.append({"id":"provider-"+str(c.provider_id),"type":"provider"});edges.append({"source":"provider-"+str(c.provider_id),"target":"claim-"+str(c.id),"relationship":"submitted_to"})
+    edges=graph_from_neo4j["edges"] or [{"source":"customer-"+str(c.customer_id),"target":"claim-"+str(c.id),"relationship":"has_claim"}]
+    if c.provider_id:nodes.append({"id":"provider-"+str(c.provider_id),"type":"provider"});edges.append({"source":"claim-"+str(c.id),"target":"provider-"+str(c.provider_id),"relationship":"associated_with"})
     return jsonify({"claim":claim_to_dict(c),"graph":{"nodes":nodes,"edges":edges},"anomaly_score":round(score,3),"signals":signals,"recommendation":"Human investigation recommended." if signals else "No configured anomaly signal detected."})
 
 @app.route("/billing",methods=["GET"])
@@ -1538,6 +1555,8 @@ def relationship_graph():
             "amount": claim.claimed_amount,
             "status": claim.status,
             "provider_id": claim.provider_id,
+            "policy_id": claim.policy_id,
+            "application_id": getattr(claim.policy, "application_id", None) if claim.policy else None,
         }
         try:
             neo4j_upsert_claim(payload)
@@ -1561,11 +1580,11 @@ def relationship_graph():
                 "status": claim.status,
                 "amount": claim.claimed_amount,
             })
-            add_edge(customer_node, claim_node, "submitted")
+            add_edge(customer_node, claim_node, "has_claim")
             if claim.provider_id:
                 provider_node = f"provider-{claim.provider_id}"
                 add_node(provider_node, "provider", {"id": claim.provider_id})
-                add_edge(provider_node, claim_node, "handles")
+                add_edge(claim_node, provider_node, "associated_with")
 
     if user.role == "admin":
         applications = Application.query.order_by(Application.created_at.desc()).limit(1000).all()
@@ -1647,6 +1666,8 @@ def claim_graph(claim_id):
             "amount": c.claimed_amount,
             "status": c.status,
             "provider_id": c.provider_id,
+            "policy_id": c.policy_id,
+            "application_id": getattr(c.policy, "application_id", None) if c.policy else None,
         })
         graph = neo4j_claim_graph(c.id, allowed_claim_ids=visible_ids)
     except Exception:
@@ -1668,9 +1689,9 @@ def claim_graph(claim_id):
         if not any(x["id"]==n for x in nodes):nodes.append({"id":n,"type":t})
     add("customer-"+str(c.customer_id),"customer")
     for x in related:
-        add("claim-"+str(x.id),"claim");edges.append({"source":"customer-"+str(c.customer_id),"target":"claim-"+str(x.id),"relationship":"submitted"})
+        add("claim-"+str(x.id),"claim");edges.append({"source":"customer-"+str(c.customer_id),"target":"claim-"+str(x.id),"relationship":"has_claim"})
         if x.provider_id:
-            add("provider-"+str(x.provider_id),"provider");edges.append({"source":"provider-"+str(x.provider_id),"target":"claim-"+str(x.id),"relationship":"submitted_to"})
+            add("provider-"+str(x.provider_id),"provider");edges.append({"source":"claim-"+str(x.id),"target":"provider-"+str(x.provider_id),"relationship":"associated_with"})
     audit(user.id, "claim_graph_viewed", "claim", c.id, {"source": "postgres"})
     db.session.commit()
     return jsonify({

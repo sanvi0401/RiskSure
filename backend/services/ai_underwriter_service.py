@@ -117,6 +117,10 @@ class AIUnderwriterService:
             "statistical_evidence": statistics,
             "graph_evidence": graph,
             "policy_evidence": policy_evidence,
+            "claims": [
+                {key: claim.get(key) for key in ("id", "policy_id", "status", "claimed_amount", "approved_amount")}
+                for claim in evidence.get("claims", []) if isinstance(claim, dict)
+            ],
             "decision_history": evidence.get("decision_history", []),
             "question": question.strip()[:500] or "Summarize the evidence and identify investigation questions.",
         }

@@ -77,6 +77,7 @@ class Policy(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     policy_number = db.Column(db.String(80), unique=True, nullable=False, index=True)
     customer_id = db.Column(db.Integer, db.ForeignKey("customer_profiles.id"), nullable=False, index=True)
+    application_id = db.Column(db.Integer, db.ForeignKey("applications.id"), nullable=True, index=True)
     provider_id = db.Column(db.Integer, db.ForeignKey("providers.id"), nullable=True)
     policy_type = db.Column(db.String(80), nullable=False, default="health")
     status = db.Column(db.String(30), nullable=False, default="active")
@@ -88,6 +89,7 @@ class Policy(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     customer = db.relationship("CustomerProfile", backref="policies")
+    application = db.relationship("Application", backref="policies")
     provider = db.relationship("Provider", backref="policies")
 
 

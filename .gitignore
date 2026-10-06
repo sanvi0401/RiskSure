@@ -17,6 +17,12 @@ backend/__pycache__/
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
+.vercel/
+.pytest_cache/
+**/.pytest_cache/
+artifacts/
 
 .DS_Store
 *.db

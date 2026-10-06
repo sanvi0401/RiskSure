@@ -97,10 +97,12 @@ def sync_claim(claim: Any) -> bool:
         neo4j_upsert_policy({
             "policy_id": policy.id,
             "customer_id": policy.customer_id,
+            "application_id": getattr(policy, "application_id", None),
             "policy_number": policy.policy_number,
             "status": policy.status,
             "policy_type": policy.policy_type,
         })
+    application_id = getattr(policy, "application_id", None) if policy is not None else None
     return neo4j_upsert_claim({
         "customer_id": claim.customer_id,
         "claim_id": claim.id,
@@ -109,6 +111,7 @@ def sync_claim(claim: Any) -> bool:
         "status": claim.status,
         "provider_id": claim.provider_id,
         "policy_id": claim.policy_id,
+        "application_id": application_id,
     })
 
 
@@ -156,7 +159,7 @@ def application_graph(
     if application.assigned_underwriter_id is not None and application.reviewed_at is not None:
         underwriter_id = f"underwriter-{application.assigned_underwriter_id}"
         _add_node(nodes, underwriter_id, "underwriter", {"id": application.assigned_underwriter_id})
-        _add_edge(edges, underwriter_id, application_node, "reviewed")
+        _add_edge(edges, application_node, underwriter_id, "reviewed_by")
 
     if application.decision and application.decision != "Unknown":
         decision_id = f"decision-{application_id}"
@@ -172,6 +175,7 @@ def application_graph(
         neo4j_upsert_policy({
             "policy_id": policy.id,
             "customer_id": policy.customer_id,
+            "application_id": getattr(policy, "application_id", None) or application_id,
             "policy_number": policy.policy_number,
             "status": policy.status,
             "policy_type": policy.policy_type,
@@ -183,8 +187,9 @@ def application_graph(
             "status": policy.status,
             "policy_type": policy.policy_type,
         })
+        _add_edge(edges, application_node, policy_id, "has_policy")
         if customer_id is not None:
-            _add_edge(edges, f"customer-{customer_id}", policy_id, "holds")
+            _add_edge(edges, f"customer-{customer_id}", policy_id, "has_policy")
 
     for related in related_applications:
         if related.id == application_id:
@@ -214,6 +219,7 @@ def application_graph(
         })
         if customer_id is not None and claim.customer_id == customer_id:
             _add_edge(edges, f"customer-{customer_id}", claim_id, "has_claim")
+            _add_edge(edges, application_node, claim_id, "has_claim")
         if claim.provider_id is not None:
             provider_id = f"provider-{claim.provider_id}"
             provider = getattr(claim, "provider", None)
@@ -231,11 +237,11 @@ def application_graph(
                 "policy_number": claim_policy.policy_number if claim_policy is not None else None,
                 "status": claim_policy.status if claim_policy is not None else None,
             })
-            _add_edge(edges, claim_policy_id, claim_id, "covers")
+            _add_edge(edges, claim_policy_id, claim_id, "has_claim")
         sync_claim(claim)
 
     synced = sync_application(application)
-    neo4j_graph = neo4j_application_graph(application_id) if synced else {"nodes": [], "edges": []}
+    neo4j_graph = neo4j_application_graph(application_id, allowed_node_ids=set(nodes)) if synced else {"nodes": [], "edges": []}
     configured = all(os.getenv(name) for name in ("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"))
     if neo4j_graph["nodes"]:
         return {
@@ -269,6 +275,11 @@ def system_graph(
     underwriters = list(underwriters)
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[tuple[str, str, str], dict[str, str]] = {}
+    policy_application: dict[int, int] = {
+        policy.id: policy.application_id
+        for policy in policies
+        if getattr(policy, "application_id", None) is not None
+    }
     for profile in profiles:
         _add_node(nodes, f"customer-{profile.id}", "customer", {
             "id": profile.id,
@@ -296,7 +307,7 @@ def system_graph(
         if application.assigned_underwriter_id is not None and application.reviewed_at is not None:
             underwriter_id = f"underwriter-{application.assigned_underwriter_id}"
             _add_node(nodes, underwriter_id, "underwriter", {"id": application.assigned_underwriter_id})
-            _add_edge(edges, underwriter_id, app_id, "reviewed")
+            _add_edge(edges, app_id, underwriter_id, "reviewed_by")
         if application.decision and application.decision != "Unknown":
             decision_id = f"decision-{application.id}"
             _add_node(nodes, decision_id, "decision", {
@@ -320,10 +331,13 @@ def system_graph(
             "policy_number": policy.policy_number,
             "status": policy.status,
             "policy_type": policy.policy_type,
+            "application_id": getattr(policy, "application_id", None),
         })
         customer_id = f"customer-{policy.customer_id}"
         _add_node(nodes, customer_id, "customer", {"id": policy.customer_id})
-        _add_edge(edges, customer_id, policy_id, "holds")
+        _add_edge(edges, customer_id, policy_id, "has_policy")
+        if getattr(policy, "application_id", None) is not None:
+            _add_edge(edges, f"application-{policy.application_id}", policy_id, "has_policy")
     for claim in claims:
         claim_id = f"claim-{claim.id}"
         _add_node(nodes, claim_id, "claim", {
@@ -337,7 +351,9 @@ def system_graph(
         _add_edge(edges, customer_id, claim_id, "has_claim")
         policy_id = f"policy-{claim.policy_id}"
         _add_node(nodes, policy_id, "policy", {"id": claim.policy_id})
-        _add_edge(edges, policy_id, claim_id, "covers")
+        _add_edge(edges, policy_id, claim_id, "has_claim")
+        if (application_id := policy_application.get(claim.policy_id)) is not None:
+            _add_edge(edges, f"application-{application_id}", claim_id, "has_claim")
         if claim.provider_id is not None:
             provider_id = f"provider-{claim.provider_id}"
             provider = getattr(claim, "provider", None)
@@ -387,6 +403,7 @@ def system_graph(
         "policies": [{
             "policy_id": policy.id,
             "customer_id": policy.customer_id,
+            "application_id": getattr(policy, "application_id", None),
             "policy_number": policy.policy_number,
             "status": policy.status,
             "policy_type": policy.policy_type,
@@ -399,6 +416,7 @@ def system_graph(
             "status": claim.status,
             "provider_id": claim.provider_id,
             "policy_id": claim.policy_id,
+            "application_id": policy_application.get(claim.policy_id),
         } for claim in claims],
     }
     neo4j_sync_system_projection(projection)

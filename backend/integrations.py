@@ -30,6 +30,8 @@ def neo4j_driver():
         return GraphDatabase.driver(
             os.environ["NEO4J_URI"],
             auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+            connection_timeout=10,
+            connection_acquisition_timeout=15,
         )
     except Exception:
         return None
@@ -46,17 +48,21 @@ def neo4j_upsert_claim(claim: dict[str, Any]) -> bool:
     MERGE (c)-[:HAS_CLAIM]->(cl)
     FOREACH (_ IN CASE WHEN $policy_id IS NULL THEN [] ELSE [1] END |
       MERGE (p:Policy {id: $policy_id})
-      MERGE (p)-[:COVERS]->(cl)
+      MERGE (p)-[:HAS_CLAIM]->(cl)
+    )
+    FOREACH (_ IN CASE WHEN $application_id IS NULL THEN [] ELSE [1] END |
+      MERGE (a:Application {id: $application_id})
+      MERGE (a)-[:HAS_CLAIM]->(cl)
     )
     WITH cl
     FOREACH (_ IN CASE WHEN $provider_id IS NULL THEN [] ELSE [1] END |
       MERGE (p:Provider {id: $provider_id})
-      MERGE (p)-[:HANDLES]->(cl)
+      MERGE (cl)-[:ASSOCIATED_WITH]->(p)
     )
     """
     try:
         with _neo4j_session(driver) as session:
-            parameters = {"policy_id": None, **claim}
+            parameters = {"policy_id": None, "application_id": None, **claim}
             session.run(query, **parameters).consume()
         return True
     except Exception:
@@ -72,9 +78,9 @@ def neo4j_claim_graph(claim_id: int, allowed_claim_ids: list[int] | None = None)
         return {"nodes": [], "edges": []}
     query = """
     MATCH (c:Claim {id: $claim_id})
-    OPTIONAL MATCH (customer:Customer)-[:HAS_CLAIM|SUBMITTED]->(c)
-    OPTIONAL MATCH (provider:Provider)-[:HANDLES]->(c)
-    OPTIONAL MATCH (customer)-[:HAS_CLAIM|SUBMITTED]->(related:Claim)
+    OPTIONAL MATCH (customer:Customer)-[:HAS_CLAIM]->(c)
+    OPTIONAL MATCH (c)-[:ASSOCIATED_WITH]->(provider:Provider)
+    OPTIONAL MATCH (customer)-[:HAS_CLAIM]->(related:Claim)
     WHERE related.id IN $allowed_claim_ids
     RETURN c, customer, provider, related
     """
@@ -103,17 +109,17 @@ def neo4j_claim_graph(claim_id: int, allowed_claim_ids: list[int] | None = None)
                 provider = row["provider"]
                 related = row["related"]
                 if customer is not None:
-                    edge = (f"customer-{customer.get('id')}", f"claim-{claim_id}", "submitted")
+                    edge = (f"customer-{customer.get('id')}", f"claim-{claim_id}", "has_claim")
                     if edge not in seen_edges:
                         seen_edges.add(edge)
                         edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
                 if provider is not None:
-                    edge = (f"provider-{provider.get('id')}", f"claim-{claim_id}", "handles")
+                    edge = (f"claim-{claim_id}", f"provider-{provider.get('id')}", "associated_with")
                     if edge not in seen_edges:
                         seen_edges.add(edge)
                         edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
                 if related is not None and customer is not None:
-                    edge = (f"customer-{customer.get('id')}", f"claim-{related.get('id')}", "submitted")
+                    edge = (f"customer-{customer.get('id')}", f"claim-{related.get('id')}", "has_claim")
                     if edge not in seen_edges:
                         seen_edges.add(edge)
                         edges.append({"source": edge[0], "target": edge[1], "relationship": edge[2]})
@@ -143,7 +149,7 @@ def neo4j_upsert_application(application: dict[str, Any]) -> bool:
     FOREACH (_ IN CASE WHEN $underwriter_id IS NULL THEN [] ELSE [1] END |
       MERGE (u:Underwriter {id: $underwriter_id})
       FOREACH (__ IN CASE WHEN $reviewed_at IS NULL THEN [] ELSE [1] END |
-        MERGE (u)-[:REVIEWED]->(a)
+        MERGE (a)-[:REVIEWED_BY]->(u)
       )
     )
     FOREACH (_ IN CASE WHEN $decision IS NULL OR $decision = 'Unknown' THEN [] ELSE [1] END |
@@ -198,10 +204,15 @@ def neo4j_link_application_policy(application_id: int, policy: dict[str, Any]) -
     MERGE (p:Policy {id: $policy_id})
     SET p.policy_number=$policy_number, p.status=$status, p.policy_type=$policy_type
     MERGE (a)-[:HAS_POLICY]->(p)
+    FOREACH (_ IN CASE WHEN $customer_id IS NULL THEN [] ELSE [1] END |
+      MERGE (c:Customer {id: $customer_id})
+      MERGE (c)-[:HAS_POLICY]->(p)
+    )
     """
     try:
         with _neo4j_session(driver) as session:
-            session.run(query, application_id=application_id, **policy).consume()
+            parameters = {"application_id": application_id, "customer_id": None, **policy}
+            session.run(query, **parameters).consume()
         return True
     except Exception:
         logger.warning("Neo4j policy synchronization failed")
@@ -219,10 +230,15 @@ def neo4j_upsert_policy(policy: dict[str, Any]) -> bool:
     MERGE (p:Policy {id: $policy_id})
     SET p.policy_number=$policy_number, p.status=$status, p.policy_type=$policy_type
     MERGE (c)-[:HAS_POLICY]->(p)
+    FOREACH (_ IN CASE WHEN $application_id IS NULL THEN [] ELSE [1] END |
+      MERGE (a:Application {id: $application_id})
+      MERGE (a)-[:HAS_POLICY]->(p)
+    )
     """
     try:
         with _neo4j_session(driver) as session:
-            session.run(query, **policy).consume()
+            parameters = {"application_id": None, **policy}
+            session.run(query, **parameters).consume()
         return True
     except Exception:
         logger.warning("Neo4j policy synchronization failed")
@@ -318,7 +334,7 @@ def neo4j_sync_system_projection(projection: dict[str, list[dict[str, Any]]]) ->
             )
             FOREACH (_ IN CASE WHEN item.underwriter_id IS NULL OR item.reviewed_at IS NULL THEN [] ELSE [1] END |
               MERGE (u:Underwriter {id:item.underwriter_id})
-              MERGE (u)-[:REVIEWED]->(a)
+              MERGE (a)-[:REVIEWED_BY]->(u)
             )
             FOREACH (_ IN CASE WHEN item.decision IS NULL OR item.decision = 'Unknown' THEN [] ELSE [1] END |
               MERGE (d:Decision {application_id:item.application_id})
@@ -358,6 +374,10 @@ def neo4j_sync_system_projection(projection: dict[str, list[dict[str, Any]]]) ->
             MERGE (p:Policy {id:item.policy_id})
             SET p.policy_number=item.policy_number, p.status=item.status, p.policy_type=item.policy_type
             MERGE (c)-[:HAS_POLICY]->(p)
+            FOREACH (_ IN CASE WHEN item.application_id IS NULL THEN [] ELSE [1] END |
+              MERGE (a:Application {id:item.application_id})
+              MERGE (a)-[:HAS_POLICY]->(p)
+            )
             """,
             "policies",
         ),
@@ -370,11 +390,15 @@ def neo4j_sync_system_projection(projection: dict[str, list[dict[str, Any]]]) ->
             MERGE (c)-[:HAS_CLAIM]->(cl)
             FOREACH (_ IN CASE WHEN item.policy_id IS NULL THEN [] ELSE [1] END |
               MERGE (p:Policy {id:item.policy_id})
-              MERGE (p)-[:COVERS]->(cl)
+              MERGE (p)-[:HAS_CLAIM]->(cl)
+            )
+            FOREACH (_ IN CASE WHEN item.application_id IS NULL THEN [] ELSE [1] END |
+              MERGE (a:Application {id:item.application_id})
+              MERGE (a)-[:HAS_CLAIM]->(cl)
             )
             FOREACH (_ IN CASE WHEN item.provider_id IS NULL THEN [] ELSE [1] END |
               MERGE (p:Provider {id:item.provider_id})
-              MERGE (p)-[:HANDLES]->(cl)
+              MERGE (cl)-[:ASSOCIATED_WITH]->(p)
             )
             """,
             "claims",
@@ -410,12 +434,12 @@ def _graph_node(node: Any) -> dict[str, Any]:
 
 
 def _graph_relationship(relationship: Any, start: Any, end: Any) -> dict[str, str]:
-    source = _graph_node(start)["id"]
-    target = _graph_node(end)["id"]
+    source = _graph_node(relationship.start_node)["id"]
+    target = _graph_node(relationship.end_node)["id"]
     return {"source": source, "target": target, "relationship": str(relationship.type).lower()}
 
 
-def neo4j_application_graph(application_id: int) -> dict[str, list]:
+def neo4j_application_graph(application_id: int, allowed_node_ids: set[str] | None = None) -> dict[str, list]:
     """Read only the application-centered component; no user-supplied Cypher or labels."""
     driver = neo4j_driver()
     if driver is None:
@@ -447,6 +471,10 @@ def neo4j_application_graph(application_id: int) -> dict[str, list]:
                     if relationship is not None and start is not None and end is not None:
                         item = _graph_relationship(relationship, start, end)
                         edges[(item["source"], item["target"], item["relationship"])] = item
+        if allowed_node_ids is not None:
+            nodes = {key: node for key, node in nodes.items() if key in allowed_node_ids}
+            edges = {key: edge for key, edge in edges.items()
+                     if edge["source"] in nodes and edge["target"] in nodes}
         return {"nodes": list(nodes.values()), "edges": list(edges.values())}
     except Exception:
         logger.warning("Neo4j application graph read failed")
@@ -499,17 +527,20 @@ def hf_request(prompt: str, *, max_tokens: int = 500) -> str | None:
         return None
     try:
         response = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
+            "https://router.huggingface.co/v1/chat/completions",
             headers={"Authorization": f"Bearer {token}"},
-            json={"inputs": prompt, "parameters": {"max_new_tokens": max_tokens, "return_full_text": False}},
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": max_tokens, "stream": False},
             timeout=60,
         )
         response.raise_for_status()
         payload = response.json()
-        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
-            return payload[0].get("generated_text") or payload[0].get("text")
+        choices = payload.get("choices", []) if isinstance(payload, dict) else []
+        if choices and isinstance(choices[0], dict):
+            content = (choices[0].get("message") or {}).get("content")
+            return content.strip() if isinstance(content, str) and content.strip() else None
     except (requests.RequestException, ValueError):
-        pass
+        logger.warning("Hugging Face chat request failed; no AI response was generated")
     return None
 
 
@@ -520,7 +551,7 @@ def hf_embeddings(texts: list[str]) -> list[list[float]] | None:
         return None
     try:
         response = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
+            f"https://router.huggingface.co/hf-inference/models/{model}",
             headers={"Authorization": f"Bearer {token}"},
             json={"inputs": texts, "options": {"wait_for_model": True}},
             timeout=60,
