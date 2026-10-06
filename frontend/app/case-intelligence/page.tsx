@@ -107,7 +107,8 @@ function CaseIntelligence() {
     try {
       const result = await apiJson<CaseEvidence["ai_explanation"] & { application_id: number }>(
         API_ENDPOINTS.caseAssistant(applicationId),
-        { method: "POST", body: JSON.stringify({ question }) },
+        // Include the provider's 60-second deadline plus graph and policy retrieval.
+        { method: "POST", body: JSON.stringify({ question }), timeoutMs: 90_000 },
       )
       setEvidence((current) => current ? { ...current, ai_explanation: result } : current)
     } catch (requestError) {

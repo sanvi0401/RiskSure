@@ -5,6 +5,7 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import time
 
 import pyotp
 import requests
@@ -34,6 +35,19 @@ def check_page():
         raise RuntimeError("The live page displayed an error alert")
     if browser(["errors"]):
         raise RuntimeError("Browser reported an uncaught error")
+
+
+def wait_ai_summary():
+    deadline = time.monotonic() + 100
+    while time.monotonic() < deadline:
+        result = json.loads(browser(["eval", "({ready:document.body.innerText.includes('AI interpretation'), "
+                                     "error:Boolean(document.querySelector('[role=alert]'))})"]))
+        if result["error"]:
+            raise RuntimeError("The live AI summary displayed an error alert")
+        if result["ready"]:
+            return
+        time.sleep(1)
+    raise RuntimeError("The live AI summary exceeded its bounded deadline")
 
 
 def select_option(placeholder, value):
@@ -174,7 +188,7 @@ def main():
             check_page()
             if label == "case-intelligence":
                 click("Generate evidence summary")
-                browser(["wait", "--text", "AI interpretation"])
+                wait_ai_summary()
                 check_page()
             browser(["screenshot", str(root / "artifacts" / f"production-{label}.png")])
             print(f"Underwriter {label}: loaded evidence passed.", flush=True)

@@ -37,14 +37,17 @@ export const API_ENDPOINTS = {
   relationshipGraph: "/graph",
 }
 
-export async function apiFetch(path: string, init: RequestInit = {}) {
+type ApiRequestInit = RequestInit & { timeoutMs?: number }
+
+export async function apiFetch(path: string, init: ApiRequestInit = {}) {
+  const { timeoutMs = 30_000, ...requestInit } = init
   const token =
     typeof window !== "undefined"
       ? localStorage.getItem("risksure_access_token")
       : null
 
-  const headers = new Headers(init.headers)
-  if (init.body && !headers.has("Content-Type")) {
+  const headers = new Headers(requestInit.headers)
+  if (requestInit.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json")
   }
   // Respect an explicit Authorization header (TOTP challenge/setup and refresh tokens).
@@ -53,16 +56,15 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   }
 
   const controller = new AbortController()
-  const timeoutMs = 30_000
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const response = await fetch(
       `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`,
-      { ...init, headers, cache: "no-store", signal: init.signal ?? controller.signal },
+      { ...requestInit, headers, cache: "no-store", signal: requestInit.signal ?? controller.signal },
     )
 
-    const usedStoredToken = !new Headers(init.headers).has("Authorization")
+    const usedStoredToken = !new Headers(requestInit.headers).has("Authorization")
     if (response.status === 401 && usedStoredToken && typeof window !== "undefined" && !path.includes("/auth/")) {
       const refresh = localStorage.getItem("risksure_refresh_token")
       if (refresh) {
@@ -75,11 +77,11 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
           const refreshData = await refreshResponse.json().catch(() => null)
           if (refreshResponse.ok && refreshData?.access_token) {
             localStorage.setItem("risksure_access_token", refreshData.access_token)
-            const retryHeaders = new Headers(init.headers)
-            if (init.body && !retryHeaders.has("Content-Type")) retryHeaders.set("Content-Type", "application/json")
+            const retryHeaders = new Headers(requestInit.headers)
+            if (requestInit.body && !retryHeaders.has("Content-Type")) retryHeaders.set("Content-Type", "application/json")
             retryHeaders.set("Authorization", "Bearer " + refreshData.access_token)
             return fetch(`${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`, {
-              ...init, headers: retryHeaders, cache: "no-store",
+              ...requestInit, headers: retryHeaders, cache: "no-store",
             })
           }
         } catch {
@@ -111,7 +113,7 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   }
 }
 
-export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiJson<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
   const response = await apiFetch(path, init)
   const data = await response.json().catch(() => null)
   if (!response.ok) {
