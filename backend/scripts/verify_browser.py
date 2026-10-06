@@ -40,7 +40,8 @@ def check_page():
 def wait_ai_summary():
     deadline = time.monotonic() + 100
     while time.monotonic() < deadline:
-        result = json.loads(browser(["eval", "({ready:document.body.innerText.includes('AI interpretation'), "
+        result = json.loads(browser(["eval", "({ready:Array.from(document.querySelectorAll('h3'))"
+                                     ".some(heading => heading.textContent.trim() === 'AI interpretation'), "
                                      "error:Boolean(document.querySelector('[role=alert]'))})"]))
         if result["error"]:
             raise RuntimeError("The live AI summary displayed an error alert")
