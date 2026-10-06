@@ -20,6 +20,7 @@ function harness(respond) {
     risksure_refresh_token: "unit-refresh",
     risksure_user: '{"id":7,"email":"staff@example.invalid","role":"underwriter"}',
   }
+  let stateIndex = 0
   let sessionCleared = false
   runInNewContext(compiled, {
     exports, window: {},
@@ -30,15 +31,15 @@ function harness(respond) {
     },
     sessionStorage: { clear: () => { sessionCleared = true } },
     require: name => {
-      if (name === "react/jsx-runtime") return { jsx: (_, props) => ({ props }) }
+      if (name === "react/jsx-runtime") return { jsx: (_, props, key) => ({ props, key }) }
       if (name === "react") return {
         createContext: () => ({ Provider: {} }),
         useRef: value => ({ current: value }),
         useEffect: callback => effects.push(callback),
         useState: value => {
-          const index = states.length
-          states.push(value)
-          return [value, next => { states[index] = next }]
+          const index = stateIndex++
+          if (!(index in states)) states[index] = value
+          return [states[index], next => { states[index] = next }]
         },
       }
       if (name === "next/navigation") return { useRouter: () => ({ replace: path => routes.push(path) }) }
@@ -49,8 +50,12 @@ function harness(respond) {
       throw new Error("Unexpected test import")
     },
   })
-  const auth = exports.AuthProvider({ children: null }).props.value
-  return { auth, storage, states, effects, calls, routes, sessionCleared: () => sessionCleared }
+  const render = () => {
+    stateIndex = 0
+    return exports.AuthProvider({ children: null })
+  }
+  const auth = render().props.value
+  return { auth, render, storage, states, effects, calls, routes, sessionCleared: () => sessionCleared }
 }
 
 test("logout clears local data and navigates to Thank you before server acknowledgment", async () => {
@@ -94,4 +99,11 @@ test("a pending session restoration cannot resurrect a signed-out user", async (
   assert.equal(h.states[3], null)
   assert.equal(h.states[4], null)
   assert.deepEqual(h.routes, ["/signed-out"])
+})
+
+test("sign-out remounts workspace providers to discard in-memory application drafts", async () => {
+  const h = harness(async () => new Response("{}"))
+  assert.equal(h.render().key, "active-session")
+  await h.auth.logout()
+  assert.equal(h.render().key, "signed-out")
 })

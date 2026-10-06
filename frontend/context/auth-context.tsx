@@ -107,6 +107,7 @@ export function AuthProvider({children}:{children:ReactNode}){
   finally{setIsSigningOut(false)}
  }
  const hasRole=(roles:UserRole|UserRole[])=>!!user&&(Array.isArray(roles)?roles:[roles]).includes(user.role)
- return <AuthContext.Provider value={{user,token,isLoading,login,verifyTotp,verifyRecovery,verifyTotpSetup,logout,isSigningOut,signedOut,signOutError,hasRole}}>{children}</AuthContext.Provider>
+ // Remount workspace providers so sign-out also discards in-memory drafts.
+ return <AuthContext.Provider key={signedOut ? "signed-out" : "active-session"} value={{user,token,isLoading,login,verifyTotp,verifyRecovery,verifyTotpSetup,logout,isSigningOut,signedOut,signOutError,hasRole}}>{children}</AuthContext.Provider>
 }
 export function useAuth(){const context=useContext(AuthContext);if(!context)throw new Error("useAuth must be used inside AuthProvider");return context}

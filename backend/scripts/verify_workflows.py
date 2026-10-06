@@ -2,18 +2,23 @@
 import argparse
 import json
 from pathlib import Path
+import pyotp
 
-from verify_browser import browser, check_page, click, wait_path
+from verify_browser import browser, check_page, click, select_option, wait_path
 from verify_centres import choose_policy, evaluate, layout_check, ui_login
 from verify_live import login, request, save_state
 
 
 def link(name):
-    browser(["find", "role", "link", "click", "--name", name, "--exact"])
+    references = json.loads(browser(["snapshot", "-i", "--json"]))["data"]["refs"]
+    reference = next(key for key, item in references.items() if item["role"] == "link" and item["name"] == name)
+    browser(["click", "@" + reference])
 
 
 def tab(name):
-    browser(["find", "role", "tab", "click", "--name", name])
+    references = json.loads(browser(["snapshot", "-i", "--json"]))["data"]["refs"]
+    reference = next(key for key, item in references.items() if item["role"] == "tab" and item["name"].startswith(name))
+    browser(["click", "@" + reference])
 
 
 def screenshot(root, name):
@@ -38,6 +43,48 @@ def sign_out(api, role, root):
     wait_path("/login")
     assert evaluate("document.querySelectorAll('input[name=role]').length") == 3
     print(f"{role}: Thank you, cleared local session, revoked access/refresh tokens, and return to login passed.", flush=True)
+
+
+def verify_sign_outs(args):
+    state = json.loads(args.state.read_text())
+    base = args.base_url.rstrip("/")
+    root = Path(__file__).resolve().parents[2] / "artifacts"
+    browser(["open", base + "/login"], capture_output=False)
+    browser(["eval", "localStorage.clear(); sessionStorage.clear(); true"])
+    browser(["open", base + "/login"])
+    browser(["set", "viewport", "1440", "1000"])
+    for role in ("customer", "underwriter", "admin"):
+        account = state["accounts"][role]
+        browser(["click", f'label:has(input[name="role"][value="{role}"])'])
+        browser(["fill", "#login-email", account["email"]])
+        browser(["fill", "#login-password", account["password"]])
+        click("Sign in")
+        browser(["wait", 'input[aria-label="Authenticator code"]'])
+        browser(["fill", 'input[aria-label="Authenticator code"]', pyotp.TOTP(account["totp_secret"]).now()])
+        click("Verify code")
+        wait_path("/" + role)
+        browser(["wait", "--load", "networkidle"])
+        check_page()
+        if role == "customer":
+            link("New Application")
+            wait_path("/new-application")
+            browser(["fill", "#name", "Discarded private sign-out draft"])
+            browser(["fill", "#age", "36"])
+            select_option("Select sex", "Female")
+            click("Proceed to Risk Assessment")
+            wait_path("/risk")
+            assert evaluate("JSON.parse(sessionStorage.getItem('risksure_application_draft')).name") == "Discarded private sign-out draft"
+        if role == "underwriter":
+            link("Final Review")
+            wait_path("/final")
+            assert not evaluate("document.querySelector('main').textContent.includes('Discarded private sign-out draft')")
+            screenshot(root, "workflow-draft-cleared-across-sessions")
+            print("In-memory application draft was cleared across SPA sign-out and the next role login.", flush=True)
+        if role == "admin":
+            browser(["set", "viewport", "390", "844"])
+        sign_out(base + "/api", role, root)
+    state.setdefault("verification", {})["sign_out_draft_reset"] = True
+    save_state(args.state, state)
 
 
 def verify(args):
@@ -65,8 +112,8 @@ def verify(args):
     tab("Unassigned")
     browser(["fill", 'input[aria-label="Search applications"]', str(case_id)])
     case = request(api, "GET", f"/applications/{case_id}", token=underwriter["token"])
+    browser(["open", base + f"/underwriter?case={case_id}"])
     if case["review_status"] != "completed":
-        browser(["open", base + f"/underwriter?case={case_id}"])
         browser(["wait", "#underwriting-decision"])
         if case["assigned_underwriter_id"] is None:
             assert evaluate("document.querySelector('#underwriting-decision').disabled")
@@ -74,7 +121,7 @@ def verify(args):
             browser(["wait", "--text", "Application assigned to you."])
         browser(["wait", "--fn", "!document.querySelector('#underwriting-decision').disabled"])
         tab("My cases")
-        browser(["fill", 'input[aria-label="Search applications"]', "Workflow Release"])
+        browser(["fill", 'input[aria-label="Search applications"]', case["name"]])
         browser(["wait", "--text", f"Case #{case_id}"])
         browser(["open", base + f"/underwriter?case={case_id}"])
         browser(["wait", "#underwriting-decision"])
@@ -174,4 +221,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--base-url", required=True)
-    verify(parser.parse_args())
+    parser.add_argument("--sign-outs-only", action="store_true")
+    args = parser.parse_args()
+    if args.sign_outs_only:
+        verify_sign_outs(args)
+    else:
+        verify(args)
