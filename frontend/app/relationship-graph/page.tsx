@@ -5,6 +5,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout"
 import { apiFetch, API_ENDPOINTS } from "@/lib/api"
 import { useAuth } from "@/context/auth-context"
 import { RoleGuard } from "@/components/auth/role-guard"
+import { CaseNavigation } from "@/components/underwriting/case-navigation"
 import { Loader2, Network, RefreshCw } from "lucide-react"
 import { RelationshipGraphCanvas, type RelationshipGraph } from "@/components/underwriting/relationship-graph-canvas"
 
@@ -21,6 +22,7 @@ function RelationshipGraphPageContent() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [applicationId, setApplicationId] = useState("")
+  const [queryReady, setQueryReady] = useState(false)
   const [expanding, setExpanding] = useState(false)
   const requestId = useRef(0)
 
@@ -36,9 +38,10 @@ function RelationshipGraphPageContent() {
         return
       }
       const query = new URLSearchParams()
-      if (user?.role === "underwriter") query.set("application_id", applicationId)
-      if (expandNodeId) query.set(user?.role === "admin" ? "expand_node_id" : "expand_node_id", expandNodeId)
-      const endpoint = user?.role === "admin" ? API_ENDPOINTS.adminGraph : API_ENDPOINTS.relationshipGraph
+      const caseScoped = !!applicationId && (user.role === "underwriter" || user.role === "admin")
+      if (caseScoped) query.set("application_id", applicationId)
+      if (expandNodeId) query.set("expand_node_id", expandNodeId)
+      const endpoint = user.role === "admin" && !caseScoped ? API_ENDPOINTS.adminGraph : API_ENDPOINTS.relationshipGraph
       const suffix = query.size ? `?${query.toString()}` : ""
       const response = await apiFetch(`${endpoint}${suffix}`)
       const data = await response.json().catch(() => null)
@@ -60,23 +63,26 @@ function RelationshipGraphPageContent() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setApplicationId(new URLSearchParams(window.location.search).get("application_id") ?? "")
+      const rawId = new URLSearchParams(window.location.search).get("application_id") ?? ""
+      setApplicationId(/^\d+$/.test(rawId) ? rawId : "")
+      setQueryReady(true)
     }
   }, [])
   useEffect(() => {
-    if (!user?.role) return
+    if (!user?.role || !queryReady) return
     if (user?.role !== "underwriter" || applicationId) void load()
     else if (user?.role) {
       setLoading(false)
       setError("Enter an application ID to view its scoped relationship graph.")
     }
-  }, [user?.role, applicationId, load])
+  }, [user?.role, applicationId, load, queryReady])
 
-  const meta = titles[user?.role || "admin"]
+  const meta = user?.role === "admin" && applicationId ? titles.underwriter : titles[user?.role || "admin"]
 
   return (
     <RoleGuard allowedRoles={["underwriter", "claims_officer", "provider", "admin"]}>
       <DashboardLayout title={meta.title} subtitle={meta.subtitle}>
+        {applicationId && (user?.role === "underwriter" || user?.role === "admin") && <CaseNavigation applicationId={Number(applicationId)} current="graph" />}
         <div className="space-y-6">
           <section className="glass-panel rounded-[2rem] p-6">
             <div className="flex flex-wrap items-center justify-between gap-4">

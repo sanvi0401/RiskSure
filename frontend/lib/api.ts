@@ -68,7 +68,8 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
     )
 
     const usedStoredToken = !new Headers(requestInit.headers).has("Authorization")
-    if (response.status === 401 && usedStoredToken && typeof window !== "undefined" && !path.includes("/auth/")) {
+    if (response.status === 401 && token && usedStoredToken && typeof window !== "undefined" && !path.includes("/auth/")) {
+      if (localStorage.getItem("risksure_access_token") !== token) return response
       const refresh = localStorage.getItem("risksure_refresh_token")
       if (refresh) {
         try {
@@ -79,6 +80,7 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
             signal: controller.signal,
           })
           const refreshData = await refreshResponse.json().catch(() => null)
+          if (localStorage.getItem("risksure_refresh_token") !== refresh) return response
           if (refreshResponse.ok && refreshData?.access_token) {
             localStorage.setItem("risksure_access_token", refreshData.access_token)
             const retryHeaders = new Headers(requestInit.headers)
@@ -93,6 +95,7 @@ export async function apiFetch(path: string, init: ApiRequestInit = {}) {
           // Fall through to normal session cleanup.
         }
       }
+      if (localStorage.getItem("risksure_access_token") !== token) return response
       localStorage.removeItem("risksure_access_token")
       localStorage.removeItem("risksure_refresh_token")
       localStorage.removeItem("risksure_user")

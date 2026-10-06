@@ -848,6 +848,8 @@ def assign_underwriting(application_id):
     application = db.session.get(Application, application_id)
     if application is None:
         return jsonify({"error": "Application not found"}), 404
+    if application.review_status == "completed":
+        return jsonify({"error": "A completed underwriting case cannot be reassigned or reopened"}), 409
     if user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
         return jsonify({"error": "Application is assigned to another underwriter"}), 403
     data = request.get_json(silent=True) or {}
@@ -1210,6 +1212,7 @@ def admin_overview():
     assigned_counts = (
         db.session.query(Application.assigned_underwriter_id, db.func.count(Application.id))
         .filter(Application.assigned_underwriter_id.isnot(None))
+        .filter(Application.review_status != "completed")
         .group_by(Application.assigned_underwriter_id)
         .all()
     )
@@ -1227,6 +1230,7 @@ def admin_overview():
         "applications": Application.query.count(),
         "pending_applications": Application.query.filter_by(review_status="pending").count(),
         "applications_under_review": Application.query.filter_by(review_status="in_review").count(),
+        "manual_review_applications": Application.query.filter_by(review_status="manual_review").count(),
         "approved_applications": Application.query.filter(Application.review_status == "completed", Application.decision.in_(("Approved", "Approved with Conditions"))).count(),
         "rejected_applications": Application.query.filter_by(review_status="completed", decision="Rejected").count(),
         "high_risk_applications": Application.query.filter(Application.final_risk >= 0.67).count(),
@@ -1508,14 +1512,14 @@ def case_assistant(application_id):
 def relationship_graph():
     """Return a role-scoped relationship graph for the frontend."""
     user = current_user_record()
-    if user.role == "underwriter":
+    if user.role == "underwriter" or (user.role == "admin" and "application_id" in request.args):
         application_id = request.args.get("application_id", type=int)
         if application_id is None:
             return jsonify({"error": "application_id is required for underwriter graph access"}), 400
         application = db.session.get(Application, application_id)
         if application is None:
             return jsonify({"error": "Application not found"}), 404
-        if application.assigned_underwriter_id not in {None, user.id}:
+        if user.role == "underwriter" and application.assigned_underwriter_id not in {None, user.id}:
             return jsonify({"error": "Application is assigned to another underwriter"}), 403
         related_claims = Claim.query.filter_by(customer_id=application.customer_id).order_by(Claim.created_at.desc()).all() if application.customer_id else []
         policy = Policy.query.filter_by(customer_id=application.customer_id).order_by(Policy.created_at.desc()).first() if application.customer_id else None

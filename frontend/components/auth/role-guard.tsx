@@ -10,20 +10,20 @@ interface RoleGuardProps {
 }
 
 export function RoleGuard({ allowedRoles, children }: RoleGuardProps) {
-  const { user, isLoading, hasRole } = useAuth()
+  const { user, isLoading, signedOut, hasRole } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
 
   useEffect(() => {
     if (isLoading) return
     if (!user) {
-      router.replace(`/login?next=${encodeURIComponent(pathname)}`)
+      router.replace(signedOut ? "/signed-out" : `/login?next=${encodeURIComponent(pathname)}`)
       return
     }
     if (!hasRole(allowedRoles)) {
       router.replace(getDashboardRoute(user.role))
     }
-  }, [isLoading, user, hasRole, allowedRoles, router, pathname])
+  }, [isLoading, signedOut, user, hasRole, allowedRoles, router, pathname])
 
   if (isLoading || !user || !hasRole(allowedRoles)) {
     return <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">Checking access…</div>

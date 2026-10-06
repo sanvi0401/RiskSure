@@ -185,6 +185,8 @@ def test_underwriting_flow(client, session, monkeypatch):
     assert overview.json["approved_applications"] == 0
     assigned = client.put(f"/underwriting/applications/{application_id}/assign", headers=underwriter_headers, json={})
     assert assigned.status_code == 200, assigned.json
+    active_workload = client.get("/admin/overview", headers=admin_headers).json["underwriting_workload"]
+    assert next(item for item in active_workload if item["email"] == "workflow-underwriter@example.com")["assigned_applications"] == 1
 
     graph_service = backend.application_graph.__module__
     import importlib
@@ -203,6 +205,9 @@ def test_underwriting_flow(client, session, monkeypatch):
     assert evidence.json["risk"]["risk_score"] == pytest.approx(body["risk_score"])
     assert evidence.json["statistics"]["sample_size"] >= 1
     assert evidence.json["human_review_required"] is True
+    admin_case_graph = client.get(f"/graph?application_id={application_id}", headers=admin_headers)
+    assert admin_case_graph.status_code == 200
+    assert any(node["id"] == f"application-{application_id}" for node in admin_case_graph.json["nodes"])
     assistant = client.post(
         f"/cases/{application_id}/assistant",
         headers=underwriter_headers,
@@ -221,7 +226,12 @@ def test_underwriting_flow(client, session, monkeypatch):
     completed = next(item for item in customer_applications if item["id"] == application_id)
     assert completed["review_status"] == "completed"
     assert completed["decision"] == "Approved with Conditions"
-    assert client.get("/admin/overview", headers=admin_headers).json["approved_applications"] == 1
+    assert client.put(f"/underwriting/applications/{application_id}/assign", headers=underwriter_headers, json={}).status_code == 409
+    assert client.put(f"/underwriting/applications/{application_id}/decision", headers=underwriter_headers, json={"decision": "Rejected", "reason": "Overwrite attempt"}).status_code == 409
+    assert client.get(f"/applications/{application_id}", headers=headers).json["review_status"] == "completed"
+    completed_overview = client.get("/admin/overview", headers=admin_headers).json
+    assert completed_overview["approved_applications"] == 1
+    assert next(item for item in completed_overview["underwriting_workload"] if item["email"] == "workflow-underwriter@example.com")["assigned_applications"] == 0
     with backend.app.app_context():
         policy = backend.Policy.query.filter_by(application_id=application_id).one()
         assert policy.customer_id == completed["customer_id"]

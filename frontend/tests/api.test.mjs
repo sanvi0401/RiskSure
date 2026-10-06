@@ -105,3 +105,56 @@ test("refresh and retry remain bounded until the retry finishes", async () => {
   await pending
   assert.deepEqual(cleared, [1])
 })
+
+test("a stale 401 after logout cannot refresh or redirect the session", async () => {
+  const storage = { risksure_access_token: "unit-expired", risksure_refresh_token: "unit-refresh" }
+  let finish
+  const { api, calls } = harness({
+    storage,
+    respond: () => new Promise(resolve => { finish = () => resolve(new Response("{}", { status: 401 })) }),
+  })
+  const pending = api.apiFetch("/policies")
+  delete storage.risksure_access_token
+  delete storage.risksure_refresh_token
+  finish()
+  assert.equal((await pending).status, 401)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(storage, {})
+})
+
+test("a refresh already in flight cannot restore tokens after logout", async () => {
+  const storage = { risksure_access_token: "unit-expired", risksure_refresh_token: "unit-refresh" }
+  let finish
+  const { api, calls } = harness({
+    storage,
+    respond: (number) => number === 1
+      ? new Response("{}", { status: 401 })
+      : new Promise(resolve => { finish = () => resolve(new Response('{"access_token":"unit-refreshed"}')) }),
+  })
+  const pending = api.apiFetch("/policies")
+  while (calls.length < 2) await new Promise(resolve => setImmediate(resolve))
+  delete storage.risksure_access_token
+  delete storage.risksure_refresh_token
+  finish()
+  assert.equal((await pending).status, 401)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(storage, {})
+})
+
+test("a refresh network failure after logout cannot redirect away from Thank you", async () => {
+  const storage = { risksure_access_token: "unit-expired", risksure_refresh_token: "unit-refresh" }
+  let fail
+  const { api, calls } = harness({
+    storage,
+    respond: (number) => number === 1
+      ? new Response("{}", { status: 401 })
+      : new Promise((_, reject) => { fail = () => reject(new TypeError("Offline")) }),
+  })
+  const pending = api.apiFetch("/policies")
+  while (calls.length < 2) await new Promise(resolve => setImmediate(resolve))
+  delete storage.risksure_access_token
+  delete storage.risksure_refresh_token
+  fail()
+  assert.equal((await pending).status, 401)
+  assert.deepEqual(storage, {})
+})

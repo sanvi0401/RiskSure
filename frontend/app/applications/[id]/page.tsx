@@ -8,6 +8,7 @@ import { RoleGuard } from "@/components/auth/role-guard"
 import { Button } from "@/components/ui/button"
 import { apiJson, API_ENDPOINTS } from "@/lib/api"
 import { useAuth } from "@/context/auth-context"
+import { CaseNavigation } from "@/components/underwriting/case-navigation"
 import { RelationshipGraphCanvas, type RelationshipGraph } from "@/components/underwriting/relationship-graph-canvas"
 
 interface ApplicationDetails {
@@ -76,6 +77,7 @@ function ApplicationDetailsView() {
 
   return (
     <DashboardLayout title="Application Details" subtitle="Application status and underwriting decision">
+      {Number.isSafeInteger(parsedId) && parsedId > 0 && <CaseNavigation applicationId={parsedId} current="application" />}
       {loading ? <div role="status" className="glass-panel rounded-[2rem] p-8">Loading application…</div>
         : error ? <div role="alert" className="glass-panel rounded-[2rem] p-6 text-destructive">{error}</div>
           : application ? <div className="space-y-6">
@@ -126,7 +128,7 @@ function ApplicationDetailsView() {
               </div>
             </section>
             <div className="flex flex-wrap gap-3">
-              <Link href="/dashboard"><Button variant="outline">Back to dashboard</Button></Link>
+              <Button variant="outline" asChild><Link href={user?.role === "customer" ? "/customer" : `/underwriter?case=${parsedId}`}>{user?.role === "customer" ? "Back to dashboard" : "Back to queue"}</Link></Button>
             </div>
           </div> : null}
     </DashboardLayout>

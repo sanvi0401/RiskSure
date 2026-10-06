@@ -1,54 +1,45 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
-import { useAuth, UserRole } from "@/context/auth-context"
-import {
-  ArrowUpRight, LayoutDashboard, FilePlus, Activity, Scale, Calculator, FileText, Orbit, Shield,
-  ClipboardList, Network, Receipt, Users,
-} from "lucide-react"
+import { getDashboardRoute, useAuth, UserRole } from "@/context/auth-context"
+import { LayoutDashboard, FilePlus, Activity, Scale, Calculator, FileText, Shield, ClipboardList, Network, Receipt, LogOut, Menu, X } from "lucide-react"
+import { Button } from "@/components/ui/button"
 
 const navItems: { href: string; label: string; icon: typeof LayoutDashboard; roles: UserRole[] }[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["customer","underwriter","claims_officer","provider","admin"] },
-  { href: "/new-application", label: "New Application", icon: FilePlus, roles: ["customer","underwriter","admin"] },
-  { href: "/risk", label: "Risk Scoring", icon: Activity, roles: ["customer","underwriter","admin"] },
-  { href: "/underwriting", label: "Underwriting", icon: Scale, roles: ["underwriter","admin"] },
-  { href: "/claims", label: "Claims Centre", icon: ClipboardList, roles: ["claims_officer","admin"] },
-  { href: "/provider", label: "Provider Portal", icon: Network, roles: ["provider","admin"] },
-  { href: "/premium", label: "Billing Centre", icon: Calculator, roles: ["customer","admin"] },
-  { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter","claims_officer","admin"] },
-  { href: "/fraud", label: "Fraud Investigation", icon: Network, roles: ["underwriter","claims_officer","admin"] },
-  { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer","underwriter","claims_officer","admin"] },
-  { href: "/relationship-graph", label: "Relationship Graph", icon: Network, roles: ["underwriter","claims_officer","provider","admin"] },
-  { href: "/admin", label: "Admin Centre", icon: Users, roles: ["admin"] },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ["customer", "underwriter", "claims_officer", "provider", "admin"] },
+  { href: "/underwriter", label: "Underwriting", icon: Scale, roles: ["admin"] },
+  { href: "/new-application", label: "New Application", icon: FilePlus, roles: ["customer", "underwriter", "admin"] },
+  { href: "/risk", label: "Risk Scoring", icon: Activity, roles: ["customer", "underwriter", "admin"] },
+  { href: "/claims", label: "Claims Centre", icon: ClipboardList, roles: ["claims_officer", "admin"] },
+  { href: "/provider", label: "Provider Portal", icon: Network, roles: ["provider", "admin"] },
+  { href: "/premium", label: "Billing Centre", icon: Calculator, roles: ["customer", "admin"] },
+  { href: "/final", label: "Final Review", icon: FileText, roles: ["underwriter", "claims_officer", "admin"] },
+  { href: "/fraud", label: "Fraud Investigation", icon: Network, roles: ["underwriter", "claims_officer", "admin"] },
+  { href: "/policy", label: "Policy Centre", icon: Receipt, roles: ["customer", "underwriter", "claims_officer", "admin"] },
+  { href: "/relationship-graph", label: "Relationship Graph", icon: Network, roles: ["underwriter", "claims_officer", "provider", "admin"] },
   { href: "/admin/graph", label: "System Graph", icon: Network, roles: ["admin"] },
 ]
 
 export function Sidebar() {
   const pathname = usePathname()
-  const { user, logout, hasRole } = useAuth()
-
-  return (
-    <aside className="glass-panel relative z-20 w-full rounded-[2rem] p-4 lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:w-[290px] lg:self-start">
-      <div className="flex items-center gap-4 rounded-[1.6rem] border border-white/8 bg-white/5 px-4 py-4">
-        <div className="flex h-12 w-12 items-center justify-center rounded-[1.2rem] bg-primary text-primary-foreground"><Shield className="h-6 w-6" /></div>
-        <div><p className="text-lg font-semibold tracking-[-0.03em] text-foreground">RiskSure</p><p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">{user?.role ?? "guest"}</p></div>
-      </div>
-      <div className="mt-5 rounded-[1.6rem] border border-primary/10 bg-primary/8 p-4">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-primary"><Orbit className="h-3.5 w-3.5" /> Active workspace</div>
-        <p className="mt-3 text-sm leading-6 text-foreground">Access is filtered by your RiskSure role.</p>
-      </div>
-      <nav className="mt-5 flex flex-col gap-2">
-        {navItems.filter(item => hasRole(item.roles)).map((item) => {
-          const isActive = pathname === item.href || (item.href !== "/admin" && pathname.startsWith(`${item.href}/`))
-          return <Link key={item.href} href={item.href} className={cn("group flex items-center justify-between rounded-[1.2rem] border px-4 py-3.5 text-sm font-medium transition-all duration-200", isActive ? "border-primary/25 bg-primary/12 text-foreground" : "border-transparent bg-white/2 text-muted-foreground hover:border-white/10 hover:bg-white/6 hover:text-foreground")}>
-            <span className="flex items-center gap-3"><span className={cn("flex h-10 w-10 items-center justify-center rounded-2xl", isActive ? "bg-primary text-primary-foreground" : "bg-white/6 text-muted-foreground")}><item.icon className="h-5 w-5" /></span><span>{item.label}</span></span>
-            <ArrowUpRight className="h-4 w-4" />
-          </Link>
-        })}
-      </nav>
-      <button onClick={logout} className="mt-5 w-full rounded-2xl border border-white/10 px-4 py-3 text-sm text-muted-foreground hover:bg-white/5 hover:text-foreground">Sign out</button>
-    </aside>
-  )
+  const { user, logout, isSigningOut, hasRole } = useAuth()
+  const [open, setOpen] = useState(false)
+  return <aside className="mb-5 w-full shrink-0 rounded-lg border border-border bg-background/60 p-3 lg:sticky lg:top-6 lg:mb-0 lg:flex lg:h-[calc(100vh-3rem)] lg:w-[250px] lg:flex-col lg:self-start">
+    <div className="flex items-center justify-between gap-3 px-2 py-2">
+      <Link href={user ? getDashboardRoute(user.role) : "/login"} className="flex min-w-0 items-center gap-3"><Shield className="h-7 w-7 shrink-0 text-primary" /><div><p className="text-lg font-semibold">RiskSure</p><p className="text-xs capitalize text-muted-foreground">{user?.role.replaceAll("_", " ")}</p></div></Link>
+      <div className="flex gap-1 lg:hidden"><Button variant="ghost" size="icon" aria-label={open ? "Close navigation" : "Open navigation"} title="Navigation" aria-expanded={open} aria-controls="workspace-navigation" onClick={() => setOpen(value => !value)}>{open ? <X /> : <Menu />}</Button><Button variant="ghost" size="icon" aria-label="Sign out" title="Sign out" disabled={isSigningOut} onClick={() => void logout()}><LogOut /></Button></div>
+    </div>
+    <nav id="workspace-navigation" aria-label="Workspace navigation" className={cn("mt-4 min-h-0 flex-1 space-y-1 overflow-y-auto", open ? "block" : "hidden", "lg:block")}>
+      {navItems.filter(item => hasRole(item.roles)).map(item => {
+        const href = item.href === "/dashboard" && user ? getDashboardRoute(user.role) : item.href
+        const label = item.href === "/dashboard" && user?.role === "underwriter" ? "Application queue" : item.label
+        const active = pathname === href || (href !== "/admin" && pathname.startsWith(href + "/"))
+        return <Link key={item.href} href={href} onClick={() => setOpen(false)} aria-current={active ? "page" : undefined} className={cn("flex items-center gap-3 rounded-md px-3 py-3 text-sm", active ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground hover:bg-muted/30 hover:text-foreground")}><item.icon className="h-4 w-4 shrink-0" />{label}</Link>
+      })}
+    </nav>
+    <Button variant="ghost" className="mt-4 hidden w-full justify-start border-t border-border pt-3 lg:flex" disabled={isSigningOut} onClick={() => void logout()}><LogOut className="h-4 w-4" />{isSigningOut ? "Signing out..." : "Sign out"}</Button>
+  </aside>
 }

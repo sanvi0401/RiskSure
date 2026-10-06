@@ -133,8 +133,10 @@ def human_decision(args, state):
     browser(["wait", "--text", "Application assigned to you."])
     browser(["select", "#underwriting-decision", "Approved"])
     browser(["fill", "#underwriting-reason", "Isolated browser release verification of human review."])
+    click("Review decision")
+    browser(["wait", "--text", "Confirm underwriting decision"])
     click("Record decision")
-    browser(["wait", "--text", "Decision recorded."])
+    browser(["wait", "--text", f"Decision recorded for case #{application_id}:"])
     check_page()
     print(f"Underwriter UI assignment and human decision for application #{application_id}: passed.", flush=True)
 
@@ -182,7 +184,7 @@ def main():
         click("Continue")
     wait_path("/" + args.role)
     browser(["wait", "--load", "networkidle"])
-    browser(["wait", "--text", {"customer": "My applications", "admin": "Audit trail",
+    browser(["wait", "--text", {"customer": "My applications", "admin": "Risk distribution",
                                   "underwriter": "Application queue"}[args.role]])
     check_page()
     root = Path(__file__).resolve().parents[2]

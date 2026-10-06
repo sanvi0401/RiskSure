@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { DashboardLayout } from "@/components/layout/dashboard-layout"
+import { CaseNavigation } from "@/components/underwriting/case-navigation"
 import { RoleGuard } from "@/components/auth/role-guard"
 import { Button } from "@/components/ui/button"
 import { apiJson, API_ENDPOINTS } from "@/lib/api"
@@ -120,6 +121,7 @@ function CaseIntelligence() {
 
   return (
     <DashboardLayout title="Underwriting Case Intelligence" subtitle="Evidence from the stored risk assessment, application cohort, relationships, and policy documents">
+      {applicationId && <CaseNavigation applicationId={applicationId} current="evidence" />}
       {loading ? <div role="status" className="glass-panel rounded-[2rem] p-10 text-center">Loading application evidence…</div>
         : error ? <div role="alert" className="glass-panel rounded-[2rem] p-6 text-destructive">{error}</div>
           : evidence ? <div className="space-y-6">
