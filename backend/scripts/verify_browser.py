@@ -49,6 +49,10 @@ def select_option(placeholder, value):
 
 
 def customer_flow(args, state):
+    existing_ids = json.loads(browser(["eval", "(async () => { const response = await fetch('/api/applications', "
+        "{headers:{Authorization:'Bearer '+localStorage.getItem('risksure_access_token')}}); "
+        "if (!response.ok) throw new Error('Application verification failed'); "
+        "return (await response.json()).map(row => row.id); })()"] ))
     click("Start an application")
     wait_path("/new-application")
     name = "RiskSure Browser Verification " + secrets.token_hex(3)
@@ -57,6 +61,7 @@ def customer_flow(args, state):
     select_option("Select sex", "Female")
     click("Proceed to Risk Assessment")
     wait_path("/risk")
+    print("Customer applicant intake: passed.", flush=True)
     browser(["fill", "#bmi", "23.5"])
     browser(["fill", "#children", "1"])
     select_option("Select smoker status", "No")
@@ -65,15 +70,21 @@ def customer_flow(args, state):
     browser(["wait", "--text", "Review Application"])
     click("Review Application")
     wait_path("/final")
+    print("Customer real risk assessment and final review: passed.", flush=True)
     click("Submit Application")
     wait_path("/customer")
     browser(["wait", "--text", "My applications"])
-    application_id = json.loads(browser(["eval", "(async () => { const response = await fetch('/api/applications', "
+    application = json.loads(browser(["eval", "(async () => { const response = await fetch('/api/applications', "
         "{headers:{Authorization:'Bearer '+localStorage.getItem('risksure_access_token')}}); "
         "if (!response.ok) throw new Error('Application verification failed'); "
-        "const rows = await response.json(); return rows.find(row => row.name === " + json.dumps(name) + ")?.id; })()"] ))
-    if not isinstance(application_id, int):
+        "const rows = await response.json(); const row = rows.find(row => !" + json.dumps(existing_ids) + ".includes(row.id)); "
+        "return row ? {id:row.id,status:row.review_status} : null; })()"] ))
+    if not application or not isinstance(application["id"], int):
         raise RuntimeError("The browser-submitted application was not persisted")
+    if application["status"] != "pending":
+        raise RuntimeError("A submitted application bypassed human review")
+    application_id = application["id"]
+    browser(["wait", "--text", f"Application #{application_id}"])
     state["browser_application_id"] = application_id
     args.state.write_text(json.dumps(state, indent=2))
     check_page()

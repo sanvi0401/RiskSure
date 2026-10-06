@@ -47,8 +47,8 @@ function CustomerDashboard() {
       total: applications.length,
       pending: applications.filter((item) => item.review_status === "pending" || item.review_status === "draft").length,
       inReview: applications.filter((item) => item.review_status === "in_review" || item.review_status === "manual_review").length,
-      approved: applications.filter((item) => item.decision === "Approved" || item.decision === "Approved with Conditions").length,
-      rejected: applications.filter((item) => item.decision === "Rejected").length,
+      approved: applications.filter((item) => item.review_status === "completed" && (item.decision === "Approved" || item.decision === "Approved with Conditions")).length,
+      rejected: applications.filter((item) => item.review_status === "completed" && item.decision === "Rejected").length,
     }
   }, [data])
 
@@ -85,7 +85,7 @@ function CustomerDashboard() {
                     </div>
                     <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
                       <span>Risk: {(application.final_risk * 100).toFixed(1)}%</span>
-                      <span>Decision: {application.decision}</span>
+                      <span>{application.review_status === "completed" || application.review_status === "manual_review" ? "Decision" : "Risk recommendation"}: {application.decision}</span>
                       <span>Premium: ${Number(application.premium).toLocaleString()}</span>
                     </div>
                     {application.decision_reason && <p className="mt-2 text-sm">Decision explanation: {application.decision_reason}</p>}

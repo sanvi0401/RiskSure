@@ -88,7 +88,7 @@ function ApplicationDetailsView() {
                 <div><p className="text-xs text-muted-foreground">RISK SCORE</p><b>{(application.risk_score * 100).toFixed(1)}%</b></div>
                 <div><p className="text-xs text-muted-foreground">FINAL RISK</p><b>{(application.final_risk * 100).toFixed(1)}%</b></div>
                 <div><p className="text-xs text-muted-foreground">PREMIUM</p><b>${Number(application.premium).toLocaleString()}</b></div>
-                <div><p className="text-xs text-muted-foreground">DECISION</p><b>{application.decision}</b></div>
+                <div><p className="text-xs text-muted-foreground">{application.review_status === "completed" || application.review_status === "manual_review" ? "DECISION" : "RISK RECOMMENDATION"}</p><b>{application.decision}</b></div>
               </div>
               <p className="mt-5 text-sm">{application.decision_reason || "Your application is awaiting an underwriter decision."}</p>
               <p className="mt-2 text-xs text-muted-foreground">Submitted: {application.created_at ? new Date(application.created_at).toLocaleString() : "Not recorded"}{application.reviewed_at ? ` · Reviewed: ${new Date(application.reviewed_at).toLocaleString()}` : ""}</p>
