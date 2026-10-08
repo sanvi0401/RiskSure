@@ -4,4 +4,4 @@
 numpy==2.3.3
 scikit-learn==1.7.2
 xgboost==3.0.5
-joblib==1.5.2
+joblib==1.6.0
